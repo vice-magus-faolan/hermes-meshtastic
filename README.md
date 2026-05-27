@@ -25,6 +25,16 @@ Deferred until the base path is stable:
 ## Working docs
 
 - `docs/requirements.md` — MeshClaw-derived functional requirements and non-goals
+- `docs/v0-spec.md` — implementation-ready V0 contract and acceptance criteria
+- `plugins/platforms/meshtastic/README.md` — plugin scaffold contract and current limits
+
+## Local dev bootstrap
+
+To load this plugin into a local Hermes profile during development:
+
+- `bash scripts/dev-bootstrap.sh`
+
+The bootstrap script creates a symlink under `${HERMES_HOME:-~/.hermes}/plugins/platforms/meshtastic` and refuses to delete an existing non-symlink destination unless `--force` is explicit.
 
 ## Why this exists
 

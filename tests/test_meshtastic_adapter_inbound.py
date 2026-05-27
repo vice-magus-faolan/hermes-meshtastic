@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+from plugins.platforms.meshtastic import adapter
+
+
+def cfg(extra: dict) -> SimpleNamespace:
+    return SimpleNamespace(extra=extra)
+
+
+def valid_serial_extra() -> dict:
+    return {
+        "transport": "serial",
+        "serial_path": "/dev/ttyUSB0",
+        "dm_policy": "allowlist",
+        "group_policy": "allowlist",
+        "dm_allowlist": ["!89ABCDEF"],
+        "allowed_channels": [0, 2],
+        "text_chunk_bytes": 200,
+        "chunk_delay_seconds": 1.5,
+    }
+
+
+def test_normalize_inbound_dm_route() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    route = meshtastic.normalize_inbound(
+        {
+            "text": "hello from mesh",
+            "sender_node_id": "89ABCDEF",
+            "sender_name": "Alice",
+        }
+    )
+
+    assert route.text == "hello from mesh"
+    assert route.sender_node_id == "!89abcdef"
+    assert route.sender_name == "Alice"
+    assert route.is_group is False
+    assert route.channel_index is None
+    assert route.reply_target == "node/!89abcdef"
+
+
+def test_build_inbound_event_group_route() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    event = meshtastic.build_inbound_event(
+        {
+            "text": "group ping",
+            "sender": "0x89ABCDEF",
+            "senderName": "Relay-1",
+            "isGroup": "true",
+            "channelIndex": "2",
+            "channelName": "ops",
+            "messageId": "m-123",
+            "timestamp": "2026-05-27T12:34:56Z",
+        }
+    )
+
+    assert event.text == "group ping"
+    assert event.channel_prompt == adapter._MESHTASTIC_PLATFORM_HINT
+    assert event.message_id == "m-123"
+    assert event.source.chat_id == "channel/2"
+    assert event.source.chat_type == "group"
+    assert event.source.thread_id == "sender/!89abcdef"
+    assert event.source.user_id == "!89abcdef"
+    assert event.source.user_name == "Relay-1"
+
+    assert event.raw_message["meshtastic"]["is_group"] is True
+    assert event.raw_message["meshtastic"]["channel_index"] == 2
+    assert event.raw_message["meshtastic"]["reply_target"] == "channel/2"
+
+
+def test_build_inbound_event_group_route_isolated_per_sender() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    sender_a = meshtastic.build_inbound_event(
+        {
+            "text": "from alpha",
+            "sender": "89ABCDEF",
+            "isGroup": True,
+            "channelIndex": 2,
+        }
+    )
+    sender_b = meshtastic.build_inbound_event(
+        {
+            "text": "from bravo",
+            "sender": "12345678",
+            "isGroup": True,
+            "channelIndex": 2,
+        }
+    )
+
+    assert sender_a.source.chat_id == "channel/2"
+    assert sender_b.source.chat_id == "channel/2"
+    assert sender_a.source.chat_type == "group"
+    assert sender_b.source.chat_type == "group"
+    assert sender_a.source.thread_id == "sender/!89abcdef"
+    assert sender_b.source.thread_id == "sender/!12345678"
+    assert sender_a.source.thread_id != sender_b.source.thread_id
+
+
+def test_handle_inbound_routes_message_event() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "dm hello",
+                "from": "89ABCDEF",
+                "sender_name": "Node A",
+            }
+        )
+    )
+
+    assert ok is True
+    assert len(routed) == 1
+    assert routed[0].text == "dm hello"
+    assert routed[0].source.chat_id == "node/!89abcdef"
+    assert meshtastic._last_inbound_activity is not None
+
+
+def test_handle_inbound_rejects_invalid_payload() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    ok = asyncio.run(meshtastic.handle_inbound({"text": "missing sender"}))
+
+    assert ok is False
