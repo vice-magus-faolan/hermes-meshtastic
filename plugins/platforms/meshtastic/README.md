@@ -15,9 +15,8 @@ What is implemented now:
   - transport-specific status diagnostics
 
 What is intentionally not implemented yet:
-- inbound event normalization/session mapping
-- policy gate enforcement over inbound traffic
 - standalone out-of-process sender for cron delivery
+- explicit Hermes-native pairing/approval workflow design (separate follow-on task)
 
 ## Config contract (PlatformConfig.extra)
 
@@ -49,6 +48,8 @@ Validation rules are strict:
 - `transport=http` requires `http_base_url` and forbids `serial_path`
 - node IDs are canonicalized to `!<8hex>`
 - `allowlist` policies require non-empty allowlist entries
+- `require_mention` uses explicit mention metadata when available, otherwise falls back to configured `node_name`
+- if `require_mention=true` and neither mention metadata nor `node_name` is available, group traffic currently fails open rather than silently dropping every message
 - `text_chunk_bytes` must be <= 200 for LoRa-safe behavior
 
 ## Outbound target forms
@@ -62,12 +63,13 @@ Malformed targets are rejected with explicit validation errors.
 
 ## Runtime semantics at this stage
 
-The adapter now implements transport lifecycle state and outbound text delivery:
+The adapter now implements transport lifecycle state, inbound policy gates, and outbound text delivery:
 - `connect()` uses configured serial/http transport and tracks lifecycle status
+- `handle_inbound()` normalizes packets and enforces DM/group policy gates before routing
 - `probe()` includes transport health and reconnect/keepalive diagnostics
 - `send()` enforces plain-text output, chunks long payloads by UTF-8 bytes, and paces chunk sends
 
-Inbound normalization and policy enforcement are still staged, but outbound delivery now behaves radio-safely instead of failing closed.
+Pairing/approval workflow and cron-specific out-of-process sender plumbing are still follow-on items.
 
 ## Dev bootstrap
 

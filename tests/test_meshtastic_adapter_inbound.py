@@ -134,3 +134,237 @@ def test_handle_inbound_rejects_invalid_payload() -> None:
     ok = asyncio.run(meshtastic.handle_inbound({"text": "missing sender"}))
 
     assert ok is False
+
+
+def test_handle_inbound_dm_policy_disabled() -> None:
+    extra = valid_serial_extra()
+    extra["dm_policy"] = "disabled"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(meshtastic.handle_inbound({"text": "hi", "sender": "89ABCDEF"}))
+
+    assert ok is False
+    assert routed == []
+
+
+def test_handle_inbound_dm_policy_open_allows_unknown_sender() -> None:
+    extra = valid_serial_extra()
+    extra["dm_policy"] = "open"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(meshtastic.handle_inbound({"text": "hi", "sender": "12345678"}))
+
+    assert ok is True
+    assert len(routed) == 1
+
+
+def test_handle_inbound_dm_allowlist_denies_unknown_sender() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(meshtastic.handle_inbound({"text": "hi", "sender": "12345678"}))
+
+    assert ok is False
+    assert routed == []
+
+
+def test_handle_inbound_group_policy_disabled() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "disabled"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+                "mentioned": True,
+            }
+        )
+    )
+
+    assert ok is False
+
+
+def test_handle_inbound_group_allowlist_denies_disallowed_channel() -> None:
+    extra = valid_serial_extra()
+    extra["allowed_channels"] = [0]
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 2,
+                "mentioned": True,
+            }
+        )
+    )
+
+    assert ok is False
+
+
+def test_handle_inbound_group_sender_allowlist_denies_unknown_sender() -> None:
+    extra = valid_serial_extra()
+    extra["group_sender_allowlist"] = ["!12345678"]
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+                "mentioned": True,
+            }
+        )
+    )
+
+    assert ok is False
+
+
+def test_handle_inbound_group_require_mention_from_payload_flag() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "open"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    denied = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello everyone",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+                "mentioned": False,
+            }
+        )
+    )
+    allowed = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello everyone",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+                "mentioned": True,
+            }
+        )
+    )
+
+    assert denied is False
+    assert allowed is True
+
+
+def test_handle_inbound_group_require_mention_from_text_with_node_name() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "open"
+    extra["node_name"] = "RadioBot"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    denied = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello everyone",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+            }
+        )
+    )
+    allowed = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello @radiobot",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+            }
+        )
+    )
+
+    assert denied is False
+    assert allowed is True
+
+
+def test_handle_inbound_group_require_mention_fails_open_without_node_name_or_metadata() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "open"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello everyone",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+            }
+        )
+    )
+
+    assert ok is True
+
+
+def test_handle_inbound_group_does_not_treat_generic_hermes_alias_as_configured_mention() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "open"
+    extra["node_name"] = "RadioBot"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "hello @hermes",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+            }
+        )
+    )
+
+    assert ok is False
+
+
+def test_handle_inbound_group_blocks_control_commands() -> None:
+    extra = valid_serial_extra()
+    extra["group_policy"] = "open"
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "text": "/sethome",
+                "sender": "89ABCDEF",
+                "isGroup": True,
+                "channelIndex": 0,
+                "mentioned": True,
+            }
+        )
+    )
+
+    assert ok is False

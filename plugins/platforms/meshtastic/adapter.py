@@ -1,12 +1,10 @@
 """Hermes Meshtastic platform adapter.
 
-This slice wires transport lifecycle management for serial/http connectivity:
+This adapter implements V0 transport lifecycle and message handling:
 - timeout-bounded connect/disconnect
 - reconnect handling and keepalive-driven stale-session recovery
 - transport-level probe diagnostics
-
-Inbound routing and policy enforcement are implemented in dedicated follow-on
-slices.
+- inbound normalization and policy-gated routing for DM/group traffic
 """
 
 from __future__ import annotations
@@ -278,16 +276,107 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
         )
 
     async def handle_inbound(self, payload: Mapping[str, Any]) -> bool:
-        """Normalize and route inbound packets into Hermes session handling."""
+        """Normalize, policy-check, and route inbound packets into Hermes."""
 
         try:
-            event = self.build_inbound_event(payload)
+            route = self.normalize_inbound(payload)
         except Exception as exc:
             logger.warning("Meshtastic inbound normalization failed: %s", exc)
             return False
 
+        if not self._is_inbound_authorized(route, payload):
+            return False
+
+        event = self.build_inbound_event(route.raw_payload)
         self._last_inbound_activity = event.timestamp.astimezone(timezone.utc)
         await self.handle_message(event)
+        return True
+
+    def _is_inbound_authorized(
+        self, route: InboundRoute, payload: Mapping[str, Any]
+    ) -> bool:
+        """Return True when inbound traffic passes V0 DM/group policy gates."""
+
+        if route.is_group:
+            return self._is_group_authorized(route=route, payload=payload)
+        return self._is_dm_authorized(route)
+
+    def _is_dm_authorized(self, route: InboundRoute) -> bool:
+        """Apply DM policy gates using disabled/open/allowlist semantics."""
+
+        policy = self._cfg.dm_policy
+        if policy == "disabled":
+            logger.info("Meshtastic DM denied: dm_policy=disabled sender=%s", route.sender_node_id)
+            return False
+
+        if policy == "open":
+            return True
+
+        authorized = route.sender_node_id in self._cfg.dm_allowlist
+        if not authorized:
+            logger.info(
+                "Meshtastic DM denied: sender not in dm_allowlist sender=%s",
+                route.sender_node_id,
+            )
+        return authorized
+
+    def _is_group_authorized(
+        self, *, route: InboundRoute, payload: Mapping[str, Any]
+    ) -> bool:
+        """Apply group policy, channel allowlist, sender allowlist, and mention gate."""
+
+        assert route.channel_index is not None
+
+        if _is_control_command(route.text):
+            logger.info(
+                "Meshtastic group denied: control commands are DM-only sender=%s channel=%s",
+                route.sender_node_id,
+                route.channel_index,
+            )
+            return False
+
+        policy = self._cfg.group_policy
+        if policy == "disabled":
+            logger.info(
+                "Meshtastic group denied: group_policy=disabled sender=%s channel=%s",
+                route.sender_node_id,
+                route.channel_index,
+            )
+            return False
+
+        if (
+            policy == "allowlist"
+            and route.channel_index not in self._cfg.allowed_channels
+        ):
+            logger.info(
+                "Meshtastic group denied: channel not in allowed_channels sender=%s channel=%s",
+                route.sender_node_id,
+                route.channel_index,
+            )
+            return False
+
+        if self._cfg.group_sender_allowlist and (
+            route.sender_node_id not in self._cfg.group_sender_allowlist
+        ):
+            logger.info(
+                "Meshtastic group denied: sender not in group_sender_allowlist sender=%s channel=%s",
+                route.sender_node_id,
+                route.channel_index,
+            )
+            return False
+
+        if self._cfg.require_mention and not _has_required_mention(
+            payload=payload,
+            text=route.text,
+            node_name=self._cfg.node_name,
+        ):
+            logger.info(
+                "Meshtastic group denied: require_mention unsatisfied sender=%s channel=%s",
+                route.sender_node_id,
+                route.channel_index,
+            )
+            return False
+
         return True
 
     async def send(
@@ -696,6 +785,122 @@ def _coerce_optional_bool(value: Any) -> bool | None:
         return False
 
     raise ValueError("is_group must be a boolean")
+
+
+def _is_control_command(text: str) -> bool:
+    """Return True when inbound text is a control/admin command."""
+
+    stripped = text.strip()
+    return stripped.startswith("/")
+
+
+def _has_required_mention(
+    *,
+    payload: Mapping[str, Any],
+    text: str,
+    node_name: str | None,
+) -> bool:
+    """Return True when mention gate is satisfied for group inbound traffic.
+
+    Signal precedence:
+    1) explicit mention booleans from payload
+    2) structured mention lists from payload
+    3) inline textual mention of configured node_name
+
+    If no mention signal exists and no node_name is configured, this returns True
+    to avoid silently dropping all group traffic from transports that do not expose
+    mention metadata in V0 payloads.
+    """
+
+    explicit = _extract_mention_bool(payload)
+    if explicit is not None:
+        return explicit
+
+    aliases = _mention_aliases(node_name)
+
+    mentions = _extract_mentions(payload)
+    if mentions:
+        for mention in mentions:
+            normalized = _normalize_mention_token(mention)
+            if normalized and normalized in aliases:
+                return True
+        return False
+
+    if aliases:
+        normalized_tokens = {
+            _normalize_mention_token(token) for token in _tokenize_for_mentions(text)
+        }
+        normalized_tokens.discard("")
+        if normalized_tokens.intersection(aliases):
+            return True
+
+        text_lower = text.lower()
+        for alias in aliases:
+            if alias in text_lower and f"@{alias}" in text_lower:
+                return True
+        return False
+
+    return True
+
+
+def _extract_mention_bool(payload: Mapping[str, Any]) -> bool | None:
+    """Read optional boolean mention hints from inbound payload mappings."""
+
+    for key in (
+        "mentioned",
+        "is_mentioned",
+        "isMentioned",
+        "mentions_me",
+        "mentionsMe",
+    ):
+        if key in payload:
+            return _coerce_optional_bool(payload.get(key))
+    return None
+
+
+def _extract_mentions(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Extract mention tokens from common payload fields."""
+
+    for key in (
+        "mentions",
+        "mentioned_nodes",
+        "mentionedNodes",
+        "mentioned_node_ids",
+        "mentionedNodeIds",
+    ):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            return tuple(part.strip() for part in raw.split(",") if part.strip())
+        if isinstance(raw, (list, tuple, set)):
+            return tuple(str(item).strip() for item in raw if str(item).strip())
+    return ()
+
+
+def _mention_aliases(node_name: str | None) -> set[str]:
+    """Build normalized mention aliases for this adapter instance."""
+
+    aliases: set[str] = set()
+    if node_name:
+        aliases.add(_normalize_mention_token(node_name))
+    aliases.discard("")
+    return aliases
+
+
+def _normalize_mention_token(token: str) -> str:
+    """Normalize mention token text for case-insensitive matching."""
+
+    normalized = token.strip().lower()
+    while normalized.startswith("@"):
+        normalized = normalized[1:]
+    return normalized.strip()
+
+
+def _tokenize_for_mentions(text: str) -> tuple[str, ...]:
+    """Split inbound text into coarse tokens for mention matching."""
+
+    return tuple(text.replace("\n", " ").split())
 
 
 def _parse_inbound_timestamp(value: Any) -> datetime:
