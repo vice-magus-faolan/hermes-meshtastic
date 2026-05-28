@@ -44,6 +44,7 @@ Define an implementation-ready V0 contract for a Hermes-native Meshtastic platfo
   - `allowlist`
 - When policy is `allowlist`, allowlist entries are required and strictly validated.
 - Group flows support require-mention gating and optional sender allowlisting.
+- `require_mention` is deny-by-default: if payload metadata lacks mention signals, the configured `node_name` is the only textual fallback; without either signal the message is dropped.
 - Admin/control commands are DM-only and require authorization.
 
 4) Session mapping model

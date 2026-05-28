@@ -311,7 +311,7 @@ def test_handle_inbound_group_require_mention_from_text_with_node_name() -> None
     assert allowed is True
 
 
-def test_handle_inbound_group_require_mention_fails_open_without_node_name_or_metadata() -> None:
+def test_handle_inbound_group_require_mention_fails_closed_without_node_name_or_metadata() -> None:
     extra = valid_serial_extra()
     extra["group_policy"] = "open"
     meshtastic = adapter.MeshtasticAdapter(cfg(extra))
@@ -327,7 +327,7 @@ def test_handle_inbound_group_require_mention_fails_open_without_node_name_or_me
         )
     )
 
-    assert ok is True
+    assert ok is False
 
 
 def test_handle_inbound_group_does_not_treat_generic_hermes_alias_as_configured_mention() -> None:

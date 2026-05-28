@@ -49,7 +49,7 @@ Validation rules are strict:
 - node IDs are canonicalized to `!<8hex>`
 - `allowlist` policies require non-empty allowlist entries
 - `require_mention` uses explicit mention metadata when available, otherwise falls back to configured `node_name`
-- if `require_mention=true` and neither mention metadata nor `node_name` is available, group traffic currently fails open rather than silently dropping every message
+- if `require_mention=true` and neither mention metadata nor `node_name` is available, group traffic fails closed; operators must set `node_name` (or disable `require_mention`) on transports that do not expose mention metadata
 - `text_chunk_bytes` must be <= 200 for LoRa-safe behavior
 
 ## Outbound target forms

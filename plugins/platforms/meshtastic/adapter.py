@@ -807,9 +807,9 @@ def _has_required_mention(
     2) structured mention lists from payload
     3) inline textual mention of configured node_name
 
-    If no mention signal exists and no node_name is configured, this returns True
-    to avoid silently dropping all group traffic from transports that do not expose
-    mention metadata in V0 payloads.
+    If no mention signal exists and no node_name is configured, this returns False.
+    require_mention is deny-by-default: transports that do not expose mention metadata
+    must set node_name for textual fallback or group traffic is dropped.
     """
 
     explicit = _extract_mention_bool(payload)
@@ -840,7 +840,7 @@ def _has_required_mention(
                 return True
         return False
 
-    return True
+    return False
 
 
 def _extract_mention_bool(payload: Mapping[str, Any]) -> bool | None:
