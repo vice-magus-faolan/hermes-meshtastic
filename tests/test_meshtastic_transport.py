@@ -186,6 +186,11 @@ def test_http_probe_5xx_is_unhealthy() -> None:
         assert probe["ok"] is False
         assert "HTTP 500" in str(probe.get("error"))
 
+        status = transport.status()
+        assert status.last_probe_at is not None
+        assert status.last_probe_result is not None
+        assert status.last_probe_result.get("ok") is False
+
         await transport.disconnect()
 
     asyncio.run(_scenario())
@@ -245,6 +250,8 @@ class StubAdapterTransport:
             last_disconnect_at=None,
             last_probe_success=None,
             last_probe_failure=None,
+            last_probe_at=None,
+            last_probe_result=None,
             last_error=None if self.connected else "forced failure",
         )
 
@@ -255,11 +262,16 @@ def test_adapter_connect_disconnect_uses_transport() -> None:
 
     assert asyncio.run(meshtastic.connect()) is True
     probe = asyncio.run(meshtastic.probe())
+    assert isinstance(probe["running"], bool)
     assert probe["transport"] == "stub"
+    assert probe["transport_type"] == "stub"
+    assert probe["transport_address"] == "stub://addr"
+    assert probe["transport_path_or_address"] == "stub://addr"
     assert probe["transport_connected"] is True
 
     asyncio.run(meshtastic.disconnect())
     probe = asyncio.run(meshtastic.probe())
+    assert probe["running"] is False
     assert probe["transport_connected"] is False
 
 
@@ -297,6 +309,8 @@ class StubSendTransport:
             last_disconnect_at=None,
             last_probe_success=None,
             last_probe_failure=None,
+            last_probe_at=None,
+            last_probe_result=None,
             last_error=None,
         )
 

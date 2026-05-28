@@ -46,6 +46,8 @@ class TransportStatus:
     last_disconnect_at: str | None
     last_probe_success: str | None
     last_probe_failure: str | None
+    last_probe_at: str | None
+    last_probe_result: dict[str, Any] | None
     last_error: str | None
 
 
@@ -88,6 +90,8 @@ class MeshtasticTransport(abc.ABC):
         self._last_disconnect_at: datetime | None = None
         self._last_probe_success: datetime | None = None
         self._last_probe_failure: datetime | None = None
+        self._last_probe_at: datetime | None = None
+        self._last_probe_result: dict[str, Any] | None = None
         self._last_error: str | None = None
 
     @property
@@ -195,8 +199,12 @@ class MeshtasticTransport(abc.ABC):
         """Run transport-specific liveness probe with timeout and diagnostics."""
 
         if not self._connected or self._client is None:
-            self._last_probe_failure = _utcnow()
-            return {"ok": False, "error": "not_connected"}
+            probe_now = _utcnow()
+            result = {"ok": False, "error": "not_connected"}
+            self._last_probe_at = probe_now
+            self._last_probe_failure = probe_now
+            self._last_probe_result = result
+            return result
 
         try:
             detail = await asyncio.wait_for(
@@ -204,10 +212,15 @@ class MeshtasticTransport(abc.ABC):
                 timeout=self._probe_timeout_seconds,
             )
         except Exception as exc:
-            self._last_probe_failure = _utcnow()
+            probe_now = _utcnow()
+            result = {"ok": False, "error": str(exc)}
+            self._last_probe_at = probe_now
+            self._last_probe_failure = probe_now
             self._last_error = f"probe failed: {exc}"
-            return {"ok": False, "error": str(exc)}
+            self._last_probe_result = result
+            return result
 
+        self._last_probe_at = _utcnow()
         self._last_probe_success = _utcnow()
         self._keepalive_failures = 0
         self._last_error = None
@@ -217,6 +230,7 @@ class MeshtasticTransport(abc.ABC):
         else:
             payload = {"detail": detail}
         payload["ok"] = True
+        self._last_probe_result = dict(payload)
         return payload
 
     async def send_text(
@@ -265,6 +279,10 @@ class MeshtasticTransport(abc.ABC):
             last_disconnect_at=_ts(self._last_disconnect_at),
             last_probe_success=_ts(self._last_probe_success),
             last_probe_failure=_ts(self._last_probe_failure),
+            last_probe_at=_ts(self._last_probe_at),
+            last_probe_result=(
+                dict(self._last_probe_result) if self._last_probe_result is not None else None
+            ),
             last_error=self._last_error,
         )
 

@@ -487,9 +487,13 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
         return {
             "running": bool(getattr(self, "_running", False)) and status.connected,
             "transport": status.transport,
+            "transport_type": status.transport,
             "transport_address": status.address,
+            "transport_path_or_address": status.address,
             "transport_connected": status.connected,
             "transport_probe": transport_probe,
+            "last_probe_result": status.last_probe_result,
+            "last_probe_at": status.last_probe_at,
             "reconnect_attempts": status.reconnect_attempts,
             "keepalive_failures": status.keepalive_failures,
             "last_inbound_activity": _ts(self._last_inbound_activity),

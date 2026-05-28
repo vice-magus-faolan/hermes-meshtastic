@@ -66,7 +66,7 @@ Malformed targets are rejected with explicit validation errors.
 The adapter now implements transport lifecycle state, inbound policy gates, and outbound text delivery:
 - `connect()` uses configured serial/http transport and tracks lifecycle status
 - `handle_inbound()` normalizes packets and enforces DM/group policy gates before routing
-- `probe()` includes transport health and reconnect/keepalive diagnostics
+- `probe()` includes transport health, transport type/path, reconnect/keepalive diagnostics, and cached last probe result/error visibility
 - `send()` enforces plain-text output, chunks long payloads by UTF-8 bytes, and paces chunk sends
 
 Pairing/approval workflow and cron-specific out-of-process sender plumbing are still follow-on items.
