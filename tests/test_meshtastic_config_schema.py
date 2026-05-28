@@ -17,23 +17,7 @@ from plugins.platforms.meshtastic.config_schema import (
     parse_extra,
     validate_config,
 )
-
-
-def cfg(extra: dict) -> SimpleNamespace:
-    return SimpleNamespace(extra=extra)
-
-
-def valid_serial_extra() -> dict:
-    return {
-        "transport": "serial",
-        "serial_path": "/dev/ttyUSB0",
-        "dm_policy": "allowlist",
-        "group_policy": "allowlist",
-        "dm_allowlist": ["!89ABCDEF"],
-        "allowed_channels": [0],
-        "text_chunk_bytes": 200,
-        "chunk_delay_seconds": 1.5,
-    }
+from tests.meshtastic_harness import cfg, valid_serial_extra
 
 
 def test_normalize_node_id_accepts_canonical_and_variants() -> None:
