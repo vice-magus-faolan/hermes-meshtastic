@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import requests
 import pytest
@@ -11,26 +10,15 @@ from plugins.platforms.meshtastic import adapter
 from plugins.platforms.meshtastic.transport import (
     HttpMeshtasticTransport,
     MeshtasticTransport,
-    SendReceipt,
-    TransportStatus,
+    SerialMeshtasticTransport,
 )
-
-
-def cfg(extra: dict) -> SimpleNamespace:
-    return SimpleNamespace(extra=extra)
-
-
-def valid_serial_extra() -> dict:
-    return {
-        "transport": "serial",
-        "serial_path": "/dev/ttyUSB0",
-        "dm_policy": "allowlist",
-        "group_policy": "allowlist",
-        "dm_allowlist": ["!89ABCDEF"],
-        "allowed_channels": [0],
-        "text_chunk_bytes": 200,
-        "chunk_delay_seconds": 1.5,
-    }
+from tests.meshtastic_harness import (
+    StubAdapterTransport,
+    StubSendTransport,
+    cfg,
+    group_payload,
+    valid_serial_extra,
+)
 
 
 class DummyTransport(MeshtasticTransport):
@@ -108,6 +96,34 @@ class _SessionFactory:
         return cast(requests.Session, session)
 
 
+class _FakePubSub:
+    def __init__(self) -> None:
+        self.subscriptions: list[tuple[object, str]] = []
+
+    def subscribe(self, callback: object, topic: str) -> None:
+        self.subscriptions.append((callback, topic))
+
+    def unsubscribe(self, callback: object, topic: str) -> None:
+        self.subscriptions.remove((callback, topic))
+
+
+class _BrokenPubSub(_FakePubSub):
+    def subscribe(self, callback: object, topic: str) -> None:
+        del callback, topic
+        raise RuntimeError("subscribe boom")
+
+
+class _FakeSerialClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def sendText(self, text: str, **kwargs: object) -> dict[str, object]:
+        return {"text": text, **kwargs}
+
+
 def test_transport_connect_disconnect_success() -> None:
     transport = DummyTransport()
     assert asyncio.run(transport.connect()) is True
@@ -171,6 +187,102 @@ def test_keepalive_failures_trigger_reconnect_without_leaking_loop() -> None:
     asyncio.run(_scenario())
 
 
+def test_serial_transport_subscribes_inbound_pubsub_packets() -> None:
+    async def _scenario() -> None:
+        fake_pubsub = _FakePubSub()
+        fake_client = _FakeSerialClient()
+        transport = SerialMeshtasticTransport(
+            "/dev/ttyUSB0",
+            client_factory=lambda _: fake_client,
+            pubsub_bus=fake_pubsub,
+            keepalive_enabled=False,
+        )
+
+        received: list[dict[str, object]] = []
+        delivered = asyncio.Event()
+
+        async def fake_inbound_handler(payload: dict[str, object]) -> bool:
+            received.append(payload)
+            delivered.set()
+            return True
+
+        transport.set_inbound_handler(fake_inbound_handler)
+
+        assert await transport.connect() is True
+        assert len(fake_pubsub.subscriptions) == 1
+        callback, topic = fake_pubsub.subscriptions[0]
+        assert topic == "meshtastic.receive"
+        assert callable(callback)
+
+        callback(group_payload(text="bridge me", sender="89ABCDEF"), fake_client)
+        await asyncio.wait_for(delivered.wait(), timeout=1.0)
+
+        assert received == [group_payload(text="bridge me", sender="89ABCDEF")]
+
+        await transport.disconnect()
+        assert fake_pubsub.subscriptions == []
+        assert fake_client.closed is True
+
+    asyncio.run(_scenario())
+
+
+def test_serial_transport_ignores_packets_from_other_interface() -> None:
+    async def _scenario() -> None:
+        fake_pubsub = _FakePubSub()
+        fake_client = _FakeSerialClient()
+        other_client = _FakeSerialClient()
+        transport = SerialMeshtasticTransport(
+            "/dev/ttyUSB0",
+            client_factory=lambda _: fake_client,
+            pubsub_bus=fake_pubsub,
+            keepalive_enabled=False,
+        )
+
+        received: list[dict[str, object]] = []
+
+        async def fake_inbound_handler(payload: dict[str, object]) -> bool:
+            received.append(payload)
+            return True
+
+        transport.set_inbound_handler(fake_inbound_handler)
+
+        assert await transport.connect() is True
+        callback, _topic = fake_pubsub.subscriptions[0]
+        assert callable(callback)
+
+        callback(group_payload(text="ignore me", sender="89ABCDEF"), other_client)
+        await asyncio.sleep(0.05)
+        assert received == []
+
+        callback(group_payload(text="accept me", sender="89ABCDEF"), fake_client)
+        await asyncio.sleep(0.05)
+        assert received == [group_payload(text="accept me", sender="89ABCDEF")]
+
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_serial_transport_connect_failure_closes_client_when_subscription_fails() -> None:
+    async def _scenario() -> None:
+        fake_client = _FakeSerialClient()
+        transport = SerialMeshtasticTransport(
+            "/dev/ttyUSB0",
+            client_factory=lambda _: fake_client,
+            pubsub_bus=_BrokenPubSub(),
+            keepalive_enabled=False,
+        )
+
+        transport.set_inbound_handler(lambda payload: True)
+
+        assert await transport.connect() is False
+        assert transport.connected is False
+        assert fake_client.closed is True
+        assert transport.status().last_error == "connect failed: subscribe boom"
+
+    asyncio.run(_scenario())
+
+
 def test_http_probe_5xx_is_unhealthy() -> None:
     async def _scenario() -> None:
         session = cast(requests.Session, _FakeSession([200, 500]))
@@ -185,6 +297,11 @@ def test_http_probe_5xx_is_unhealthy() -> None:
         probe = await transport.probe()
         assert probe["ok"] is False
         assert "HTTP 500" in str(probe.get("error"))
+
+        status = transport.status()
+        assert status.last_probe_at is not None
+        assert status.last_probe_result is not None
+        assert status.last_probe_result.get("ok") is False
 
         await transport.disconnect()
 
@@ -219,47 +336,20 @@ def test_http_keepalive_5xx_triggers_reconnect() -> None:
     asyncio.run(_scenario())
 
 
-class StubAdapterTransport:
-    def __init__(self, *, connect_ok: bool) -> None:
-        self._connect_ok = connect_ok
-        self.connected = False
-
-    async def connect(self) -> bool:
-        self.connected = self._connect_ok
-        return self._connect_ok
-
-    async def disconnect(self) -> None:
-        self.connected = False
-
-    async def probe(self) -> dict[str, object]:
-        return {"ok": self.connected}
-
-    def status(self) -> TransportStatus:
-        return TransportStatus(
-            transport="stub",
-            address="stub://addr",
-            connected=self.connected,
-            reconnect_attempts=0,
-            keepalive_failures=0,
-            last_connect_at=None,
-            last_disconnect_at=None,
-            last_probe_success=None,
-            last_probe_failure=None,
-            last_error=None if self.connected else "forced failure",
-        )
-
-
 def test_adapter_connect_disconnect_uses_transport() -> None:
     transport = StubAdapterTransport(connect_ok=True)
     meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()), transport=transport)
 
     assert asyncio.run(meshtastic.connect()) is True
     probe = asyncio.run(meshtastic.probe())
+    assert isinstance(probe["running"], bool)
     assert probe["transport"] == "stub"
+    assert probe["transport_address"] == "stub://addr"
     assert probe["transport_connected"] is True
 
     asyncio.run(meshtastic.disconnect())
     probe = asyncio.run(meshtastic.probe())
+    assert probe["running"] is False
     assert probe["transport_connected"] is False
 
 
@@ -270,54 +360,6 @@ def test_adapter_connect_failure_sets_probe_error() -> None:
     assert asyncio.run(meshtastic.connect()) is False
     probe = asyncio.run(meshtastic.probe())
     assert probe["last_error"] == "forced failure"
-
-
-class StubSendTransport:
-    def __init__(self, *, fail_on_call: int | None = None) -> None:
-        self.fail_on_call = fail_on_call
-        self.calls: list[dict[str, Any]] = []
-
-    async def connect(self) -> bool:
-        return True
-
-    async def disconnect(self) -> None:
-        return None
-
-    async def probe(self) -> dict[str, object]:
-        return {"ok": True}
-
-    def status(self) -> TransportStatus:
-        return TransportStatus(
-            transport="stub-send",
-            address="stub://send",
-            connected=True,
-            reconnect_attempts=0,
-            keepalive_failures=0,
-            last_connect_at=None,
-            last_disconnect_at=None,
-            last_probe_success=None,
-            last_probe_failure=None,
-            last_error=None,
-        )
-
-    async def send_text(
-        self,
-        *,
-        text: str,
-        destination_id: str | None,
-        channel_index: int | None,
-    ) -> SendReceipt:
-        call = {
-            "text": text,
-            "destination_id": destination_id,
-            "channel_index": channel_index,
-        }
-        self.calls.append(call)
-
-        if self.fail_on_call is not None and len(self.calls) == self.fail_on_call:
-            raise RuntimeError("forced send failure")
-
-        return SendReceipt(message_id=f"msg-{len(self.calls)}", raw_response={"ok": True})
 
 
 def test_adapter_send_chunks_and_paces(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,3 +424,28 @@ def test_adapter_send_partial_failure_is_non_retryable() -> None:
     assert result.raw_response is not None
     assert result.raw_response["sent_chunks"] == 1
     assert result.raw_response["total_chunks"] >= 2
+
+
+def test_adapter_send_normalizes_meshtastic_prefixed_node_target() -> None:
+    transport = StubSendTransport()
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()), transport=transport)
+
+    result = asyncio.run(meshtastic.send("meshtastic:node/89ABCDEF", "hello"))
+
+    assert result.success is True
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["destination_id"] == "!89abcdef"
+    assert transport.calls[0]["channel_index"] is None
+
+
+def test_adapter_send_chunks_utf8_without_splitting_characters() -> None:
+    extra = valid_serial_extra(text_chunk_bytes=6, chunk_delay_seconds=0.01)
+    transport = StubSendTransport()
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra), transport=transport)
+
+    result = asyncio.run(meshtastic.send("channel/0", "ééééé"))
+
+    assert result.success is True
+    assert len(transport.calls) == 2
+    assert transport.calls[0]["text"] == "ééé"
+    assert transport.calls[1]["text"] == "éé"

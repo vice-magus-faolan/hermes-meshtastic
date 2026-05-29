@@ -5,8 +5,7 @@ This module isolates transport concerns from adapter message-routing concerns:
 - bounded reconnect attempts with exponential backoff
 - periodic keepalive probes to avoid stale sessions
 - transport-specific diagnostics for operators
-
-Message send/receive semantics are intentionally handled in other slices.
+- transport-originated inbound bridge hooks for adapter delivery
 """
 
 from __future__ import annotations
@@ -16,13 +15,16 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import importlib
+import inspect
 import logging
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+InboundHandler = Callable[[dict[str, Any]], Awaitable[bool] | bool]
 
 _OPEN_TIMEOUT_SECONDS = 12.0
 _PROBE_TIMEOUT_SECONDS = 5.0
@@ -46,6 +48,8 @@ class TransportStatus:
     last_disconnect_at: str | None
     last_probe_success: str | None
     last_probe_failure: str | None
+    last_probe_at: str | None
+    last_probe_result: dict[str, Any] | None
     last_error: str | None
 
 
@@ -81,6 +85,8 @@ class MeshtasticTransport(abc.ABC):
         self._connect_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._inbound_handler: InboundHandler | None = None
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
         self._reconnect_attempts = 0
         self._keepalive_failures = 0
@@ -88,11 +94,33 @@ class MeshtasticTransport(abc.ABC):
         self._last_disconnect_at: datetime | None = None
         self._last_probe_success: datetime | None = None
         self._last_probe_failure: datetime | None = None
+        self._last_probe_at: datetime | None = None
+        self._last_probe_result: dict[str, Any] | None = None
         self._last_error: str | None = None
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def set_inbound_handler(self, handler: InboundHandler | None) -> None:
+        """Register the adapter callback used for transport-originated inbound packets."""
+
+        self._inbound_handler = handler
+
+    async def emit_inbound(self, payload: dict[str, Any]) -> bool:
+        """Deliver a normalized inbound payload into the registered adapter callback."""
+
+        if self._inbound_handler is None:
+            logger.debug(
+                "Meshtastic %s inbound packet dropped because no handler is registered",
+                self.transport_name,
+            )
+            return False
+
+        result = self._inbound_handler(payload)
+        if inspect.isawaitable(result):
+            return bool(await result)
+        return bool(result)
 
     async def connect(self) -> bool:
         """Establish transport connectivity with timeout and diagnostics."""
@@ -102,12 +130,31 @@ class MeshtasticTransport(abc.ABC):
             if self._connected:
                 return True
 
+            self._event_loop = asyncio.get_running_loop()
+            client: Any = None
             try:
                 client = await asyncio.wait_for(
                     asyncio.to_thread(self._open_client),
                     timeout=self._open_timeout_seconds,
                 )
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._after_connect, client),
+                    timeout=self._open_timeout_seconds,
+                )
             except Exception as exc:
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(self._close_client, client),
+                            timeout=self._open_timeout_seconds,
+                        )
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Meshtastic %s transport cleanup after connect failure (%s): %s",
+                            self.transport_name,
+                            self.address,
+                            cleanup_exc,
+                        )
                 self._connected = False
                 self._last_error = f"connect failed: {exc}"
                 logger.warning(
@@ -165,6 +212,7 @@ class MeshtasticTransport(abc.ABC):
             self._client = None
             self._connected = False
             self._last_disconnect_at = _utcnow()
+            self._event_loop = None
 
     async def reconnect(self) -> bool:
         """Reconnect transport with bounded exponential backoff."""
@@ -195,8 +243,12 @@ class MeshtasticTransport(abc.ABC):
         """Run transport-specific liveness probe with timeout and diagnostics."""
 
         if not self._connected or self._client is None:
-            self._last_probe_failure = _utcnow()
-            return {"ok": False, "error": "not_connected"}
+            probe_now = _utcnow()
+            result = {"ok": False, "error": "not_connected"}
+            self._last_probe_at = probe_now
+            self._last_probe_failure = probe_now
+            self._last_probe_result = result
+            return result
 
         try:
             detail = await asyncio.wait_for(
@@ -204,10 +256,15 @@ class MeshtasticTransport(abc.ABC):
                 timeout=self._probe_timeout_seconds,
             )
         except Exception as exc:
-            self._last_probe_failure = _utcnow()
+            probe_now = _utcnow()
+            result = {"ok": False, "error": str(exc)}
+            self._last_probe_at = probe_now
+            self._last_probe_failure = probe_now
             self._last_error = f"probe failed: {exc}"
-            return {"ok": False, "error": str(exc)}
+            self._last_probe_result = result
+            return result
 
+        self._last_probe_at = _utcnow()
         self._last_probe_success = _utcnow()
         self._keepalive_failures = 0
         self._last_error = None
@@ -217,6 +274,7 @@ class MeshtasticTransport(abc.ABC):
         else:
             payload = {"detail": detail}
         payload["ok"] = True
+        self._last_probe_result = dict(payload)
         return payload
 
     async def send_text(
@@ -265,6 +323,10 @@ class MeshtasticTransport(abc.ABC):
             last_disconnect_at=_ts(self._last_disconnect_at),
             last_probe_success=_ts(self._last_probe_success),
             last_probe_failure=_ts(self._last_probe_failure),
+            last_probe_at=_ts(self._last_probe_at),
+            last_probe_result=(
+                dict(self._last_probe_result) if self._last_probe_result is not None else None
+            ),
             last_error=self._last_error,
         )
 
@@ -304,6 +366,11 @@ class MeshtasticTransport(abc.ABC):
     def _close_client(self, client: Any) -> None:
         """Close transport client and release local resources."""
 
+    def _after_connect(self, client: Any) -> None:
+        """Run transport-specific post-open setup before the client is marked connected."""
+
+        del client
+
     @abc.abstractmethod
     def _probe_client(self, client: Any) -> Any:
         """Run a lightweight liveness probe against an active client."""
@@ -322,11 +389,14 @@ class MeshtasticTransport(abc.ABC):
 class SerialMeshtasticTransport(MeshtasticTransport):
     """Serial Meshtastic transport wrapper."""
 
+    _INBOUND_TOPIC = "meshtastic.receive"
+
     def __init__(
         self,
         serial_path: str,
         *,
         client_factory: Callable[[str], Any] | None = None,
+        pubsub_bus: Any | None = None,
         keepalive_enabled: bool = True,
     ) -> None:
         super().__init__(
@@ -336,11 +406,24 @@ class SerialMeshtasticTransport(MeshtasticTransport):
         )
         self._serial_path = serial_path
         self._client_factory = client_factory or _default_serial_client_factory
+        self._pubsub_bus = pubsub_bus
+        self._pubsub_callback: Callable[..., None] | None = None
+
+    def set_inbound_handler(self, handler: InboundHandler | None) -> None:
+        super().set_inbound_handler(handler)
+        if handler is None:
+            self._unsubscribe_inbound()
+        elif self._client is not None:
+            self._subscribe_inbound(self._client)
 
     def _open_client(self) -> Any:
         return self._client_factory(self._serial_path)
 
+    def _after_connect(self, client: Any) -> None:
+        self._subscribe_inbound(client)
+
     def _close_client(self, client: Any) -> None:
+        self._unsubscribe_inbound()
         close_fn = getattr(client, "close", None)
         if callable(close_fn):
             close_fn()
@@ -389,6 +472,54 @@ class SerialMeshtasticTransport(MeshtasticTransport):
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("serial sendText invocation failed")
+
+    def _subscribe_inbound(self, client: Any) -> None:
+        if self._pubsub_callback is not None or self._inbound_handler is None:
+            return
+
+        pubsub_bus = self._pubsub_bus or _default_pubsub_bus()
+
+        def _callback(packet: Any, interface: Any = None) -> None:
+            if interface is not None and interface is not client:
+                logger.debug(
+                    "Meshtastic serial inbound packet ignored because it came from a different interface"
+                )
+                return
+            self._schedule_inbound_dispatch(packet)
+
+        subscribe = getattr(pubsub_bus, "subscribe", None)
+        if not callable(subscribe):
+            raise RuntimeError("serial transport pubsub bus does not expose subscribe")
+
+        subscribe(_callback, self._INBOUND_TOPIC)
+        self._pubsub_bus = pubsub_bus
+        self._pubsub_callback = _callback
+
+    def _unsubscribe_inbound(self) -> None:
+        if self._pubsub_callback is None or self._pubsub_bus is None:
+            return
+
+        unsubscribe = getattr(self._pubsub_bus, "unsubscribe", None)
+        if callable(unsubscribe):
+            unsubscribe(self._pubsub_callback, self._INBOUND_TOPIC)
+        self._pubsub_callback = None
+
+    def _schedule_inbound_dispatch(self, packet: Any) -> None:
+        loop = self._event_loop
+        if loop is None:
+            logger.debug("Meshtastic serial inbound packet dropped because event loop is unavailable")
+            return
+
+        payload = _as_payload(packet)
+        future = asyncio.run_coroutine_threadsafe(self.emit_inbound(payload), loop)
+
+        def _log_result(done_future):
+            try:
+                done_future.result()
+            except Exception:
+                logger.exception("Meshtastic serial inbound dispatch failed")
+
+        future.add_done_callback(_log_result)
 
 
 class HttpMeshtasticTransport(MeshtasticTransport):
@@ -520,6 +651,11 @@ def _default_serial_client_factory(serial_path: str) -> Any:
         return cls(devPath=serial_path)
     except TypeError:
         return cls(serial_path)
+
+
+def _default_pubsub_bus() -> Any:
+    module = importlib.import_module("pubsub")
+    return getattr(module, "pub")
 
 
 def _utcnow() -> datetime:

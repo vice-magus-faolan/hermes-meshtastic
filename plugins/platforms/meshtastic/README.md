@@ -13,6 +13,7 @@ What is implemented now:
   - bounded reconnect retries with backoff
   - keepalive probes with stale-session reconnect
   - transport-specific status diagnostics
+  - adapter bridge hook for transport-originated inbound packets
 
 What is intentionally not implemented yet:
 - standalone out-of-process sender for cron delivery
@@ -64,9 +65,10 @@ Malformed targets are rejected with explicit validation errors.
 ## Runtime semantics at this stage
 
 The adapter now implements transport lifecycle state, inbound policy gates, and outbound text delivery:
-- `connect()` uses configured serial/http transport and tracks lifecycle status
+- `connect()` uses configured serial/http transport, registers the transport-originated inbound bridge, and tracks lifecycle status
 - `handle_inbound()` normalizes packets and enforces DM/group policy gates before routing
-- `probe()` includes transport health and reconnect/keepalive diagnostics
+- serial transport subscribes to `meshtastic.receive` pubsub packets and forwards them through the adapter bridge when the client library emits decoded payloads
+- `probe()` includes transport health, transport type/path, reconnect/keepalive diagnostics, and cached last probe result/error visibility
 - `send()` enforces plain-text output, chunks long payloads by UTF-8 bytes, and paces chunk sends
 
 Pairing/approval workflow and cron-specific out-of-process sender plumbing are still follow-on items.

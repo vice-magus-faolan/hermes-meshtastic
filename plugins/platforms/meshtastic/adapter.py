@@ -199,6 +199,7 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
     async def connect(self) -> bool:
         """Connect configured transport and update adapter connection state."""
 
+        self._set_transport_inbound_handler(self.handle_inbound)
         ok = await self._transport.connect()
         if ok:
             self._mark_connected()
@@ -215,8 +216,16 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
         return False
 
     async def disconnect(self) -> None:
+        self._set_transport_inbound_handler(None)
         await self._transport.disconnect()
         self._mark_disconnected()
+
+    def _set_transport_inbound_handler(self, handler: Any) -> None:
+        """Register or clear the transport-originated inbound bridge when supported."""
+
+        setter = getattr(self._transport, "set_inbound_handler", None)
+        if callable(setter):
+            setter(handler)
 
     def normalize_inbound(self, payload: Mapping[str, Any]) -> InboundRoute:
         """Normalize a transport packet into Hermes routing primitives."""
@@ -487,9 +496,13 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
         return {
             "running": bool(getattr(self, "_running", False)) and status.connected,
             "transport": status.transport,
+            "transport_type": status.transport,
             "transport_address": status.address,
+            "transport_path_or_address": status.address,
             "transport_connected": status.connected,
             "transport_probe": transport_probe,
+            "last_probe_result": status.last_probe_result,
+            "last_probe_at": status.last_probe_at,
             "reconnect_attempts": status.reconnect_attempts,
             "keepalive_failures": status.keepalive_failures,
             "last_inbound_activity": _ts(self._last_inbound_activity),

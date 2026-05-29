@@ -1,26 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 from plugins.platforms.meshtastic import adapter
-
-
-def cfg(extra: dict) -> SimpleNamespace:
-    return SimpleNamespace(extra=extra)
-
-
-def valid_serial_extra() -> dict:
-    return {
-        "transport": "serial",
-        "serial_path": "/dev/ttyUSB0",
-        "dm_policy": "allowlist",
-        "group_policy": "allowlist",
-        "dm_allowlist": ["!89ABCDEF"],
-        "allowed_channels": [0, 2],
-        "text_chunk_bytes": 200,
-        "chunk_delay_seconds": 1.5,
-    }
+from tests.meshtastic_harness import (
+    StubInboundTransport,
+    cfg,
+    dm_payload,
+    group_payload,
+    valid_serial_extra,
+)
 
 
 def test_normalize_inbound_dm_route() -> None:
@@ -368,3 +357,102 @@ def test_handle_inbound_group_blocks_control_commands() -> None:
     )
 
     assert ok is False
+
+
+def test_normalize_inbound_infers_group_from_channel_without_isgroup_flag() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    route = meshtastic.normalize_inbound(
+        {
+            "text": "inferred group",
+            "sender": "89ABCDEF",
+            "channelIndex": 2,
+        }
+    )
+
+    assert route.is_group is True
+    assert route.channel_index == 2
+    assert route.reply_target == "channel/2"
+
+
+def test_handle_inbound_group_require_mention_uses_structured_mentions() -> None:
+    extra = valid_serial_extra(group_policy="open", node_name="RadioBot")
+    meshtastic = adapter.MeshtasticAdapter(cfg(extra))
+
+    denied = asyncio.run(
+        meshtastic.handle_inbound(
+            group_payload(
+                text="hello team",
+                sender="89ABCDEF",
+                channel_index=0,
+                mentioned=None,
+                mentionedNodes=["OtherNode"],
+            )
+        )
+    )
+    allowed = asyncio.run(
+        meshtastic.handle_inbound(
+            group_payload(
+                text="hello team",
+                sender="89ABCDEF",
+                channel_index=0,
+                mentioned=None,
+                mentionedNodes=["@RadioBot"],
+            )
+        )
+    )
+
+    assert denied is False
+    assert allowed is True
+
+
+def test_handle_inbound_dm_payload_builder_round_trip() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(meshtastic.handle_inbound(dm_payload(text="fixture hello", sender="89ABCDEF")))
+
+    assert ok is True
+    assert len(routed) == 1
+    assert routed[0].text == "fixture hello"
+
+
+def test_connect_registers_transport_inbound_bridge() -> None:
+    async def _scenario() -> None:
+        transport = StubInboundTransport()
+        meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra(group_policy="open")), transport=transport)
+
+        routed: list[adapter.MessageEvent] = []
+
+        async def fake_handle_message(event: adapter.MessageEvent) -> None:
+            routed.append(event)
+
+        meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+        assert await meshtastic.connect() is True
+
+        ok = await transport.emit_inbound(
+            group_payload(
+                text="hello mesh",
+                sender="89ABCDEF",
+                channel_index=0,
+                mentioned=True,
+            )
+        )
+
+        assert ok is True
+        assert len(routed) == 1
+        assert routed[0].text == "hello mesh"
+        assert routed[0].source.chat_id == "channel/0"
+        assert routed[0].source.thread_id == "sender/!89abcdef"
+        assert meshtastic._last_inbound_activity is not None
+
+        await meshtastic.disconnect()
+
+    asyncio.run(_scenario())
