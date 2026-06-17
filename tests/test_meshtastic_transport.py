@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import cast
 
 import requests
@@ -11,6 +12,8 @@ from plugins.platforms.meshtastic.transport import (
     HttpMeshtasticTransport,
     MeshtasticTransport,
     SerialMeshtasticTransport,
+    TcpMeshtasticTransport,
+    make_transport,
 )
 from tests.meshtastic_harness import (
     StubAdapterTransport,
@@ -18,6 +21,7 @@ from tests.meshtastic_harness import (
     cfg,
     group_payload,
     valid_serial_extra,
+    valid_tcp_extra,
 )
 
 
@@ -116,12 +120,19 @@ class _BrokenPubSub(_FakePubSub):
 class _FakeSerialClient:
     def __init__(self) -> None:
         self.closed = False
+        self.localNode = SimpleNamespace(nodeNum=1234)
 
     def close(self) -> None:
         self.closed = True
 
     def sendText(self, text: str, **kwargs: object) -> dict[str, object]:
         return {"text": text, **kwargs}
+
+
+class _FakeTcpClient(_FakeSerialClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.nodes = {"!43b64008": {"num": 1136017416}}
 
 
 def test_transport_connect_disconnect_success() -> None:
@@ -281,6 +292,64 @@ def test_serial_transport_connect_failure_closes_client_when_subscription_fails(
         assert transport.status().last_error == "connect failed: subscribe boom"
 
     asyncio.run(_scenario())
+
+
+def test_tcp_transport_subscribes_inbound_pubsub_packets_and_reports_probe_details() -> None:
+    async def _scenario() -> None:
+        fake_pubsub = _FakePubSub()
+        fake_client = _FakeTcpClient()
+        transport = TcpMeshtasticTransport(
+            "192.168.132.135",
+            port=4403,
+            client_factory=lambda host, port: fake_client,
+            pubsub_bus=fake_pubsub,
+            keepalive_enabled=False,
+        )
+
+        received: list[dict[str, object]] = []
+        delivered = asyncio.Event()
+
+        async def fake_inbound_handler(payload: dict[str, object]) -> bool:
+            received.append(payload)
+            delivered.set()
+            return True
+
+        transport.set_inbound_handler(fake_inbound_handler)
+
+        assert await transport.connect() is True
+        assert len(fake_pubsub.subscriptions) == 1
+        callback, topic = fake_pubsub.subscriptions[0]
+        assert topic == "meshtastic.receive"
+        assert callable(callback)
+
+        callback(group_payload(text="bridge over tcp", sender="89ABCDEF"), fake_client)
+        await asyncio.wait_for(delivered.wait(), timeout=1.0)
+
+        assert received == [group_payload(text="bridge over tcp", sender="89ABCDEF")]
+
+        probe = await transport.probe()
+        assert probe["ok"] is True
+        assert probe["mode"] == "tcp"
+        assert probe["local_node"] == 1234
+        assert probe["node_count"] == 1
+
+        await transport.disconnect()
+        assert fake_pubsub.subscriptions == []
+        assert fake_client.closed is True
+
+    asyncio.run(_scenario())
+
+
+def test_make_transport_builds_tcp_transport() -> None:
+    transport = make_transport(
+        transport=valid_tcp_extra()["transport"],
+        serial_path=None,
+        http_base_url=None,
+        tcp_host=valid_tcp_extra()["tcp_host"],
+        tcp_port=valid_tcp_extra()["tcp_port"],
+    )
+    assert isinstance(transport, TcpMeshtasticTransport)
+    assert transport.address == "192.168.132.135:4403"
 
 
 def test_http_probe_5xx_is_unhealthy() -> None:

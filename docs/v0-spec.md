@@ -10,6 +10,7 @@ Define an implementation-ready V0 contract for a Hermes-native Meshtastic platfo
 - Native Hermes platform registration (`plugin.yaml`, `register(ctx)`, adapter hooks)
 - Serial transport
 - HTTP transport
+- TCP transport via the Meshtastic Python library
 - Inbound DM and group/channel message handling
 - Outbound plain-text-only delivery
 - UTF-8 byte-aware chunking and pacing for radio-safe sends
@@ -33,7 +34,8 @@ Define an implementation-ready V0 contract for a Hermes-native Meshtastic platfo
 - Do not import OpenClaw runtime coupling, pairing store semantics, or session internals.
 
 2) Transport policy
-- `transport=serial` and `transport=http` are the only valid transport values in V0.
+- `transport=serial`, `transport=http`, and `transport=tcp` are valid transport values in V0.
+- `transport=meshtastic_tcp` is accepted as a compatibility alias and normalizes to `tcp`.
 - MQTT is explicitly deferred.
 
 3) Authorization model
@@ -93,13 +95,22 @@ Define an implementation-ready V0 contract for a Hermes-native Meshtastic platfo
 
 `PlatformConfig.extra` fields:
 - Required/common:
-  - `transport`: `serial | http`
+  - `transport`: `serial | http | tcp`
 - Serial path:
   - `serial_path` required when `transport=serial`
   - `http_base_url` forbidden when `transport=serial`
+  - `tcp_host` forbidden when `transport=serial`
+  - non-default `tcp_port` forbidden when `transport=serial`
 - HTTP path:
   - `http_base_url` required when `transport=http`
   - `serial_path` forbidden when `transport=http`
+  - `tcp_host` forbidden when `transport=http`
+  - non-default `tcp_port` forbidden when `transport=http`
+- TCP path:
+  - `tcp_host` required when `transport=tcp`
+  - `tcp_port` optional and defaults to `4403`
+  - `serial_path` forbidden when `transport=tcp`
+  - `http_base_url` forbidden when `transport=tcp`
 - Optional behavior controls:
   - `node_name`
   - `dm_policy`
@@ -128,7 +139,7 @@ A V0 implementation is acceptable when all conditions below are met:
 - Chunks long text by UTF-8 byte limits and applies pacing between chunks.
 
 3) Reliability
-- Connect/disconnect/probe lifecycle works for serial and HTTP transports.
+- Connect/disconnect/probe lifecycle works for serial, HTTP, and TCP transports.
 - Reconnect behavior is bounded and observable.
 - Transport failures surface explicit diagnostics instead of silent drop.
 

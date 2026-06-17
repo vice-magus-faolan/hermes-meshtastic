@@ -3,6 +3,9 @@ name = "hermes-meshtastic"
 version = "0.1.0"
 description = "Hermes-native Meshtastic platform plugin scaffold"
 requires-python = ">=3.11"
+dependencies = [
+  "meshtastic>=2.7,<3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

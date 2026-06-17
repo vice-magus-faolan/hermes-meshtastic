@@ -1,4 +1,4 @@
-"""Meshtastic transport lifecycle primitives for serial and HTTP connectivity.
+"""Meshtastic transport lifecycle primitives for serial, HTTP, and TCP connectivity.
 
 This module isolates transport concerns from adapter message-routing concerns:
 - connect/disconnect with timeout bounds
@@ -386,26 +386,24 @@ class MeshtasticTransport(abc.ABC):
         """Send one text payload on a transport-specific active client."""
 
 
-class SerialMeshtasticTransport(MeshtasticTransport):
-    """Serial Meshtastic transport wrapper."""
+class _PubSubMeshtasticTransport(MeshtasticTransport):
+    """Shared Meshtastic library transport using the package pubsub receive hooks."""
 
     _INBOUND_TOPIC = "meshtastic.receive"
 
     def __init__(
         self,
-        serial_path: str,
         *,
-        client_factory: Callable[[str], Any] | None = None,
+        transport_name: str,
+        address: str,
         pubsub_bus: Any | None = None,
         keepalive_enabled: bool = True,
     ) -> None:
         super().__init__(
-            transport_name="serial",
-            address=serial_path,
+            transport_name=transport_name,
+            address=address,
             keepalive_enabled=keepalive_enabled,
         )
-        self._serial_path = serial_path
-        self._client_factory = client_factory or _default_serial_client_factory
         self._pubsub_bus = pubsub_bus
         self._pubsub_callback: Callable[..., None] | None = None
 
@@ -416,9 +414,6 @@ class SerialMeshtasticTransport(MeshtasticTransport):
         elif self._client is not None:
             self._subscribe_inbound(self._client)
 
-    def _open_client(self) -> Any:
-        return self._client_factory(self._serial_path)
-
     def _after_connect(self, client: Any) -> None:
         self._subscribe_inbound(client)
 
@@ -427,16 +422,6 @@ class SerialMeshtasticTransport(MeshtasticTransport):
         close_fn = getattr(client, "close", None)
         if callable(close_fn):
             close_fn()
-
-    def _probe_client(self, client: Any) -> dict[str, Any]:
-        local_node = getattr(client, "localNode", None)
-        if local_node is None:
-            return {"mode": "serial", "local_node": None}
-
-        node_num = getattr(local_node, "nodeNum", None)
-        if node_num is None:
-            node_num = getattr(local_node, "num", None)
-        return {"mode": "serial", "local_node": node_num}
 
     def _send_text_client(
         self,
@@ -447,7 +432,7 @@ class SerialMeshtasticTransport(MeshtasticTransport):
     ) -> Any:
         send_text = getattr(client, "sendText", None)
         if not callable(send_text):
-            raise RuntimeError("serial transport client does not expose sendText")
+            raise RuntimeError(f"{self.transport_name} transport client does not expose sendText")
 
         kwargs: dict[str, Any] = {}
         if destination_id is not None:
@@ -471,7 +456,7 @@ class SerialMeshtasticTransport(MeshtasticTransport):
 
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError("serial sendText invocation failed")
+        raise RuntimeError(f"{self.transport_name} sendText invocation failed")
 
     def _subscribe_inbound(self, client: Any) -> None:
         if self._pubsub_callback is not None or self._inbound_handler is None:
@@ -482,14 +467,17 @@ class SerialMeshtasticTransport(MeshtasticTransport):
         def _callback(packet: Any, interface: Any = None) -> None:
             if interface is not None and interface is not client:
                 logger.debug(
-                    "Meshtastic serial inbound packet ignored because it came from a different interface"
+                    "Meshtastic %s inbound packet ignored because it came from a different interface",
+                    self.transport_name,
                 )
                 return
             self._schedule_inbound_dispatch(packet)
 
         subscribe = getattr(pubsub_bus, "subscribe", None)
         if not callable(subscribe):
-            raise RuntimeError("serial transport pubsub bus does not expose subscribe")
+            raise RuntimeError(
+                f"{self.transport_name} transport pubsub bus does not expose subscribe"
+            )
 
         subscribe(_callback, self._INBOUND_TOPIC)
         self._pubsub_bus = pubsub_bus
@@ -507,7 +495,10 @@ class SerialMeshtasticTransport(MeshtasticTransport):
     def _schedule_inbound_dispatch(self, packet: Any) -> None:
         loop = self._event_loop
         if loop is None:
-            logger.debug("Meshtastic serial inbound packet dropped because event loop is unavailable")
+            logger.debug(
+                "Meshtastic %s inbound packet dropped because event loop is unavailable",
+                self.transport_name,
+            )
             return
 
         payload = _as_payload(packet)
@@ -517,9 +508,82 @@ class SerialMeshtasticTransport(MeshtasticTransport):
             try:
                 done_future.result()
             except Exception:
-                logger.exception("Meshtastic serial inbound dispatch failed")
+                logger.exception("Meshtastic %s inbound dispatch failed", self.transport_name)
 
         future.add_done_callback(_log_result)
+
+
+class SerialMeshtasticTransport(_PubSubMeshtasticTransport):
+    """Serial Meshtastic transport wrapper."""
+
+    def __init__(
+        self,
+        serial_path: str,
+        *,
+        client_factory: Callable[[str], Any] | None = None,
+        pubsub_bus: Any | None = None,
+        keepalive_enabled: bool = True,
+    ) -> None:
+        super().__init__(
+            transport_name="serial",
+            address=serial_path,
+            pubsub_bus=pubsub_bus,
+            keepalive_enabled=keepalive_enabled,
+        )
+        self._serial_path = serial_path
+        self._client_factory = client_factory or _default_serial_client_factory
+
+    def _open_client(self) -> Any:
+        return self._client_factory(self._serial_path)
+
+    def _probe_client(self, client: Any) -> dict[str, Any]:
+        local_node = getattr(client, "localNode", None)
+        if local_node is None:
+            return {"mode": "serial", "local_node": None}
+
+        node_num = getattr(local_node, "nodeNum", None)
+        if node_num is None:
+            node_num = getattr(local_node, "num", None)
+        return {"mode": "serial", "local_node": node_num}
+
+
+class TcpMeshtasticTransport(_PubSubMeshtasticTransport):
+    """Meshtastic TCP/protobuf transport backed by the official Python library."""
+
+    def __init__(
+        self,
+        host: str,
+        *,
+        port: int = 4403,
+        client_factory: Callable[[str, int], Any] | None = None,
+        pubsub_bus: Any | None = None,
+        keepalive_enabled: bool = True,
+    ) -> None:
+        super().__init__(
+            transport_name="tcp",
+            address=f"{host}:{port}",
+            pubsub_bus=pubsub_bus,
+            keepalive_enabled=keepalive_enabled,
+        )
+        self._host = host
+        self._port = port
+        self._client_factory = client_factory or _default_tcp_client_factory
+
+    def _open_client(self) -> Any:
+        return self._client_factory(self._host, self._port)
+
+    def _probe_client(self, client: Any) -> dict[str, Any]:
+        local_node = getattr(client, "localNode", None)
+        if local_node is None:
+            return {"mode": "tcp", "local_node": None, "node_count": 0}
+
+        node_num = getattr(local_node, "nodeNum", None)
+        if node_num is None:
+            node_num = getattr(local_node, "num", None)
+
+        nodes = getattr(client, "nodes", None)
+        node_count = len(nodes) if isinstance(nodes, dict) else 0
+        return {"mode": "tcp", "local_node": node_num, "node_count": node_count}
 
 
 class HttpMeshtasticTransport(MeshtasticTransport):
@@ -626,6 +690,8 @@ def make_transport(
     transport: str,
     serial_path: str | None,
     http_base_url: str | None,
+    tcp_host: str | None = None,
+    tcp_port: int = 4403,
 ) -> MeshtasticTransport:
     """Instantiate a transport runtime from validated config fields."""
 
@@ -639,6 +705,11 @@ def make_transport(
             raise ValueError("http transport requires http_base_url")
         return HttpMeshtasticTransport(http_base_url)
 
+    if transport == "tcp":
+        if not tcp_host:
+            raise ValueError("tcp transport requires tcp_host")
+        return TcpMeshtasticTransport(tcp_host, port=tcp_port)
+
     raise ValueError(f"unsupported transport: {transport}")
 
 
@@ -651,6 +722,12 @@ def _default_serial_client_factory(serial_path: str) -> Any:
         return cls(devPath=serial_path)
     except TypeError:
         return cls(serial_path)
+
+
+def _default_tcp_client_factory(host: str, port: int) -> Any:
+    module = importlib.import_module("meshtastic.tcp_interface")
+    cls = getattr(module, "TCPInterface")
+    return cls(hostname=host, portNumber=port)
 
 
 def _default_pubsub_bus() -> Any:

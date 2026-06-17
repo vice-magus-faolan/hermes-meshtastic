@@ -12,9 +12,15 @@ from typing import Any, Literal, Mapping, cast
 from urllib.parse import urlparse
 
 Policy = Literal["disabled", "open", "allowlist"]
-Transport = Literal["serial", "http"]
+Transport = Literal["serial", "http", "tcp"]
 
 _ALLOWED_POLICIES: set[str] = {"disabled", "open", "allowlist"}
+_ALLOWED_TRANSPORT_ALIASES: dict[str, str] = {
+    "serial": "serial",
+    "http": "http",
+    "tcp": "tcp",
+    "meshtastic_tcp": "tcp",
+}
 _NODE_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 
@@ -39,7 +45,7 @@ class MeshtasticConfig:
     """Normalized Meshtastic platform configuration.
 
     Notes:
-    - V0 intentionally allows only serial/http transports.
+    - V0 allows serial, http, and Meshtastic TCP/protobuf transports.
     - Node IDs are canonicalized to ``!<8hex>``.
     - Chunk size is capped at 200 bytes for LoRa-safe behavior.
     """
@@ -47,6 +53,8 @@ class MeshtasticConfig:
     transport: Transport
     serial_path: str | None
     http_base_url: str | None
+    tcp_host: str | None
+    tcp_port: int
     node_name: str | None
     dm_policy: Policy
     group_policy: Policy
@@ -134,14 +142,17 @@ def parse_config(config: Any) -> MeshtasticConfig:
 def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
     """Parse and validate ``PlatformConfig.extra`` for Meshtastic."""
 
-    transport = str(extra.get("transport", "") or "").strip().lower()
-    if transport not in {"serial", "http"}:
+    transport_raw = str(extra.get("transport", "") or "").strip().lower()
+    transport = _ALLOWED_TRANSPORT_ALIASES.get(transport_raw)
+    if transport is None:
         raise ConfigValidationError(
-            "transport must be one of: serial, http (mqtt is deferred from V0)"
+            "transport must be one of: serial, http, tcp (alias: meshtastic_tcp)"
         )
 
     serial_path = _normalize_optional_str(extra.get("serial_path"))
     http_base_url = _normalize_optional_str(extra.get("http_base_url"))
+    tcp_host = _normalize_optional_str(extra.get("tcp_host"))
+    tcp_port = _parse_tcp_port(extra.get("tcp_port", 4403))
 
     if transport == "serial":
         if not serial_path:
@@ -150,6 +161,10 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
             raise ConfigValidationError(
                 "serial transport must not set extra.http_base_url"
             )
+        if tcp_host:
+            raise ConfigValidationError("serial transport must not set extra.tcp_host")
+        if "tcp_port" in extra and extra.get("tcp_port") not in {None, "", 4403, "4403"}:
+            raise ConfigValidationError("serial transport must not set extra.tcp_port")
 
     if transport == "http":
         if not http_base_url:
@@ -157,6 +172,18 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
         _validate_http_base_url(http_base_url)
         if serial_path:
             raise ConfigValidationError("http transport must not set extra.serial_path")
+        if tcp_host:
+            raise ConfigValidationError("http transport must not set extra.tcp_host")
+        if "tcp_port" in extra and extra.get("tcp_port") not in {None, "", 4403, "4403"}:
+            raise ConfigValidationError("http transport must not set extra.tcp_port")
+
+    if transport == "tcp":
+        if not tcp_host:
+            raise ConfigValidationError("tcp transport requires extra.tcp_host")
+        if serial_path:
+            raise ConfigValidationError("tcp transport must not set extra.serial_path")
+        if http_base_url:
+            raise ConfigValidationError("tcp transport must not set extra.http_base_url")
 
     dm_policy = _parse_policy(extra.get("dm_policy"), default="allowlist")
     group_policy = _parse_policy(extra.get("group_policy"), default="allowlist")
@@ -195,6 +222,8 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
         transport=cast(Transport, transport),
         serial_path=serial_path,
         http_base_url=http_base_url,
+        tcp_host=tcp_host,
+        tcp_port=tcp_port,
         node_name=node_name,
         dm_policy=dm_policy,
         group_policy=group_policy,
@@ -279,6 +308,18 @@ def _parse_channel_allowlist(value: Any) -> tuple[int, ...]:
         if idx not in channels:
             channels.append(idx)
     return tuple(channels)
+
+
+def _parse_tcp_port(value: Any) -> int:
+    if value is None or value == "":
+        return 4403
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigValidationError("tcp_port must be an integer") from exc
+    if parsed <= 0 or parsed > 65535:
+        raise ConfigValidationError("tcp_port must be between 1 and 65535")
+    return parsed
 
 
 def _parse_bool(value: Any, *, default: bool) -> bool:

@@ -17,7 +17,7 @@ from plugins.platforms.meshtastic.config_schema import (
     parse_extra,
     validate_config,
 )
-from tests.meshtastic_harness import cfg, valid_serial_extra
+from tests.meshtastic_harness import cfg, valid_serial_extra, valid_tcp_extra
 
 
 def test_normalize_node_id_accepts_canonical_and_variants() -> None:
@@ -69,6 +69,26 @@ def test_parse_http_config_ok() -> None:
     )
     assert parsed.transport == "http"
     assert parsed.http_base_url == "http://192.168.1.10:4403"
+
+
+def test_parse_tcp_config_ok() -> None:
+    parsed = parse_extra(valid_tcp_extra())
+    assert parsed.transport == "tcp"
+    assert parsed.tcp_host == "192.168.132.135"
+    assert parsed.tcp_port == 4403
+
+
+def test_parse_tcp_alias_normalizes_to_tcp() -> None:
+    parsed = parse_extra(valid_tcp_extra(transport="meshtastic_tcp"))
+    assert parsed.transport == "tcp"
+    assert parsed.tcp_host == "192.168.132.135"
+    assert parsed.tcp_port == 4403
+
+
+def test_parse_tcp_defaults_port_4403() -> None:
+    parsed = parse_extra(valid_tcp_extra(tcp_port=None))
+    assert parsed.transport == "tcp"
+    assert parsed.tcp_port == 4403
 
 
 def test_parse_rejects_transport_mismatch_fields() -> None:
@@ -221,3 +241,14 @@ def test_env_enablement_http_with_home_channel(monkeypatch: pytest.MonkeyPatch) 
     assert seed["transport"] == "http"
     assert seed["http_base_url"] == "http://localhost:4403"
     assert seed["home_channel"]["chat_id"] == "channel/0"
+
+
+def test_env_enablement_tcp_with_explicit_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MESHTASTIC_TRANSPORT", "tcp")
+    monkeypatch.setenv("MESHTASTIC_TCP_HOST", "192.168.132.135")
+    monkeypatch.setenv("MESHTASTIC_TCP_PORT", "4403")
+    seed = adapter._env_enablement()
+    assert seed is not None
+    assert seed["transport"] == "tcp"
+    assert seed["tcp_host"] == "192.168.132.135"
+    assert seed["tcp_port"] == "4403"

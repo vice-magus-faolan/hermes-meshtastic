@@ -7,12 +7,8 @@ from typing import Any
 from plugins.platforms.meshtastic.transport import SendReceipt, TransportStatus
 
 
-def valid_serial_extra(**overrides: Any) -> dict[str, Any]:
-    """Return a valid baseline serial config, with optional field overrides."""
-
+def _base_extra(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "transport": "serial",
-        "serial_path": "/dev/ttyUSB0",
         "dm_policy": "allowlist",
         "group_policy": "allowlist",
         "dm_allowlist": ["!89ABCDEF"],
@@ -22,6 +18,22 @@ def valid_serial_extra(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def valid_serial_extra(**overrides: Any) -> dict[str, Any]:
+    """Return a valid baseline serial config, with optional field overrides."""
+
+    extra = _base_extra(transport="serial", serial_path="/dev/ttyUSB0")
+    extra.update(overrides)
+    return extra
+
+
+def valid_tcp_extra(**overrides: Any) -> dict[str, Any]:
+    """Return a valid baseline TCP config, with optional field overrides."""
+
+    extra = _base_extra(transport="tcp", tcp_host="192.168.132.135", tcp_port=4403)
+    extra.update(overrides)
+    return extra
 
 
 def cfg(extra: dict[str, Any]) -> SimpleNamespace:

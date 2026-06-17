@@ -190,6 +190,8 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
             transport=self._cfg.transport,
             serial_path=self._cfg.serial_path,
             http_base_url=self._cfg.http_base_url,
+            tcp_host=self._cfg.tcp_host,
+            tcp_port=self._cfg.tcp_port,
         )
 
     @property
@@ -552,13 +554,17 @@ def _env_enablement() -> dict | None:
     """
 
     transport = os.getenv("MESHTASTIC_TRANSPORT", "").strip().lower()
-    if transport not in {"serial", "http"}:
+    if transport == "meshtastic_tcp":
+        transport = "tcp"
+    if transport not in {"serial", "http", "tcp"}:
         return None
 
     seed: dict[str, Any] = {"transport": transport}
 
     serial_path = os.getenv("MESHTASTIC_SERIAL_PATH", "").strip()
     http_base_url = os.getenv("MESHTASTIC_HTTP_BASE_URL", "").strip()
+    tcp_host = os.getenv("MESHTASTIC_TCP_HOST", "").strip()
+    tcp_port = os.getenv("MESHTASTIC_TCP_PORT", "").strip()
 
     if transport == "serial":
         if not serial_path:
@@ -568,6 +574,12 @@ def _env_enablement() -> dict | None:
         if not http_base_url:
             return None
         seed["http_base_url"] = http_base_url
+    elif transport == "tcp":
+        if not tcp_host:
+            return None
+        seed["tcp_host"] = tcp_host
+        if tcp_port:
+            seed["tcp_port"] = tcp_port
 
     optional_map = {
         "MESHTASTIC_NODE_NAME": "node_name",
@@ -616,7 +628,8 @@ def register(ctx) -> None:
         required_env=["MESHTASTIC_TRANSPORT"],
         install_hint=(
             "Configure MESHTASTIC_TRANSPORT plus transport-specific env vars "
-            "(MESHTASTIC_SERIAL_PATH or MESHTASTIC_HTTP_BASE_URL)."
+            "(MESHTASTIC_SERIAL_PATH, MESHTASTIC_HTTP_BASE_URL, or "
+            "MESHTASTIC_TCP_HOST[/MESHTASTIC_TCP_PORT])."
         ),
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="MESHTASTIC_HOME_CHANNEL",

@@ -14,7 +14,7 @@ Planned initial scope:
 - Hermes-native inbound/outbound routing
 - 200-byte chunking with radio-safe pacing
 - strong logging, probes, and reconnect behavior
-- serial and HTTP transports first
+- serial, HTTP, and TCP transports in V0
 
 Deferred until the base path is stable:
 - MQTT transport
@@ -33,8 +33,11 @@ Deferred until the base path is stable:
 To load this plugin into a local Hermes profile during development:
 
 - `bash scripts/dev-bootstrap.sh`
+- `uv pip install --python ~/.hermes/hermes-agent/venv/bin/python 'meshtastic>=2.7,<3'`
 
 The bootstrap script creates a symlink under `${HERMES_HOME:-~/.hermes}/plugins/platforms/meshtastic` and refuses to delete an existing non-symlink destination unless `--force` is explicit.
+
+The Meshtastic Python library is a runtime dependency for serial and TCP transports. If Hermes is running from a different virtualenv, point `uv pip install --python ...` at that interpreter instead.
 
 ## Why this exists
 
