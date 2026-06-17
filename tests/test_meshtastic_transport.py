@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import requests
@@ -336,6 +337,72 @@ def test_tcp_transport_subscribes_inbound_pubsub_packets_and_reports_probe_detai
         await transport.disconnect()
         assert fake_pubsub.subscriptions == []
         assert fake_client.closed is True
+
+    asyncio.run(_scenario())
+
+
+def test_adapter_tcp_runtime_uses_official_library_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _scenario() -> None:
+        fake_pubsub = _FakePubSub()
+        meshtastic_pkg = ModuleType("meshtastic")
+        meshtastic_pkg.__path__ = []  # type: ignore[attr-defined]
+        tcp_module = ModuleType("meshtastic.tcp_interface")
+        pubsub_module = ModuleType("pubsub")
+
+        class FakeOfficialTcpInterface:
+            created: list["FakeOfficialTcpInterface"] = []
+
+            def __init__(self, *, hostname: str, portNumber: int) -> None:
+                self.hostname = hostname
+                self.portNumber = portNumber
+                self.localNode = SimpleNamespace(nodeNum=1234)
+                self.nodes = {"!43b64008": {"num": 1136017416}}
+                self.closed = False
+                self.send_calls: list[dict[str, object]] = []
+                type(self).created.append(self)
+
+            def close(self) -> None:
+                self.closed = True
+
+            def sendText(self, text: str, **kwargs: object) -> dict[str, object]:
+                call = {"text": text, **kwargs}
+                self.send_calls.append(call)
+                return {"id": f"pkt-{len(self.send_calls)}", **call}
+
+        setattr(tcp_module, "TCPInterface", FakeOfficialTcpInterface)
+        setattr(pubsub_module, "pub", fake_pubsub)
+        monkeypatch.setitem(sys.modules, "meshtastic", meshtastic_pkg)
+        monkeypatch.setitem(sys.modules, "meshtastic.tcp_interface", tcp_module)
+        monkeypatch.setitem(sys.modules, "pubsub", pubsub_module)
+
+        meshtastic = adapter.MeshtasticAdapter(cfg(valid_tcp_extra(tcp_port=None)))
+
+        assert await meshtastic.connect() is True
+        assert len(FakeOfficialTcpInterface.created) == 1
+        client = FakeOfficialTcpInterface.created[0]
+        assert client.hostname == "192.168.132.135"
+        assert client.portNumber == 4403
+        assert len(fake_pubsub.subscriptions) == 1
+
+        probe = await meshtastic.probe()
+        assert probe["transport_connected"] is True
+        assert probe["transport"] == "tcp"
+        assert probe["transport_address"] == "192.168.132.135:4403"
+        assert probe["transport_probe"]["mode"] == "tcp"
+        assert probe["transport_probe"]["node_count"] == 1
+
+        result = await meshtastic.send("node/89abcdef", "hello over tcp")
+        assert result.success is True
+        assert result.message_id == "pkt-1"
+        assert result.raw_response is not None
+        assert result.raw_response["chunk_count"] == 1
+        assert client.send_calls == [
+            {"text": "hello over tcp", "destinationId": "!89abcdef"}
+        ]
+
+        await meshtastic.disconnect()
+        assert fake_pubsub.subscriptions == []
+        assert client.closed is True
 
     asyncio.run(_scenario())
 

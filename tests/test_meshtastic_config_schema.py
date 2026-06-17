@@ -20,6 +20,19 @@ from plugins.platforms.meshtastic.config_schema import (
 from tests.meshtastic_harness import cfg, valid_serial_extra, valid_tcp_extra
 
 
+def _valid_http_extra(**overrides: object) -> dict[str, object]:
+    extra: dict[str, object] = {
+        "transport": "http",
+        "http_base_url": "http://192.168.1.10:4403",
+        "dm_policy": "allowlist",
+        "group_policy": "allowlist",
+        "dm_allowlist": ["!89abcdef"],
+        "allowed_channels": [0],
+    }
+    extra.update(overrides)
+    return extra
+
+
 def test_normalize_node_id_accepts_canonical_and_variants() -> None:
     assert normalize_node_id("!89ABCDEF") == "!89abcdef"
     assert normalize_node_id("89abcdef") == "!89abcdef"
@@ -89,6 +102,24 @@ def test_parse_tcp_defaults_port_4403() -> None:
     parsed = parse_extra(valid_tcp_extra(tcp_port=None))
     assert parsed.transport == "tcp"
     assert parsed.tcp_port == 4403
+
+
+@pytest.mark.parametrize("raw_tcp_port", [4403.0, "04403"])
+@pytest.mark.parametrize("extra_factory", [valid_serial_extra, _valid_http_extra])
+def test_parse_non_tcp_accepts_default_equivalent_tcp_port_values(
+    extra_factory, raw_tcp_port: object
+) -> None:
+    parsed = parse_extra(extra_factory(tcp_port=raw_tcp_port))
+    assert parsed.tcp_port == 4403
+
+
+@pytest.mark.parametrize("raw_tcp_port", [4404.0, "04404"])
+@pytest.mark.parametrize("extra_factory", [valid_serial_extra, _valid_http_extra])
+def test_parse_non_tcp_rejects_non_default_tcp_port_values(
+    extra_factory, raw_tcp_port: object
+) -> None:
+    with pytest.raises(ConfigValidationError, match="extra\\.tcp_port"):
+        parse_extra(extra_factory(tcp_port=raw_tcp_port))
 
 
 def test_parse_rejects_transport_mismatch_fields() -> None:
@@ -248,6 +279,21 @@ def test_env_enablement_tcp_with_explicit_port(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MESHTASTIC_TCP_HOST", "192.168.132.135")
     monkeypatch.setenv("MESHTASTIC_TCP_PORT", "4403")
     seed = adapter._env_enablement()
+    assert seed is not None
+    assert seed["transport"] == "tcp"
+    assert seed["tcp_host"] == "192.168.132.135"
+    assert seed["tcp_port"] == "4403"
+
+
+def test_env_enablement_tcp_defaults_port_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MESHTASTIC_TRANSPORT", "tcp")
+    monkeypatch.setenv("MESHTASTIC_TCP_HOST", "192.168.132.135")
+    monkeypatch.delenv("MESHTASTIC_TCP_PORT", raising=False)
+
+    seed = adapter._env_enablement()
+
     assert seed is not None
     assert seed["transport"] == "tcp"
     assert seed["tcp_host"] == "192.168.132.135"

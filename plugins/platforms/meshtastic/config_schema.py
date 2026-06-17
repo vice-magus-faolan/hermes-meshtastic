@@ -163,7 +163,7 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
             )
         if tcp_host:
             raise ConfigValidationError("serial transport must not set extra.tcp_host")
-        if "tcp_port" in extra and extra.get("tcp_port") not in {None, "", 4403, "4403"}:
+        if "tcp_port" in extra and tcp_port != 4403:
             raise ConfigValidationError("serial transport must not set extra.tcp_port")
 
     if transport == "http":
@@ -174,7 +174,7 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
             raise ConfigValidationError("http transport must not set extra.serial_path")
         if tcp_host:
             raise ConfigValidationError("http transport must not set extra.tcp_host")
-        if "tcp_port" in extra and extra.get("tcp_port") not in {None, "", 4403, "4403"}:
+        if "tcp_port" in extra and tcp_port != 4403:
             raise ConfigValidationError("http transport must not set extra.tcp_port")
 
     if transport == "tcp":

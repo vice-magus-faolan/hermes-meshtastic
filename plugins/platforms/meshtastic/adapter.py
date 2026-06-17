@@ -578,8 +578,7 @@ def _env_enablement() -> dict | None:
         if not tcp_host:
             return None
         seed["tcp_host"] = tcp_host
-        if tcp_port:
-            seed["tcp_port"] = tcp_port
+        seed["tcp_port"] = tcp_port or "4403"
 
     optional_map = {
         "MESHTASTIC_NODE_NAME": "node_name",
