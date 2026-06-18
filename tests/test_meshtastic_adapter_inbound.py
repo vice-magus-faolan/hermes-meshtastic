@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from plugins.platforms.meshtastic import adapter
 from tests.meshtastic_harness import (
@@ -29,6 +30,30 @@ def test_normalize_inbound_dm_route() -> None:
     assert route.is_group is False
     assert route.channel_index is None
     assert route.reply_target == "node/!89abcdef"
+
+
+def test_normalize_inbound_official_meshtastic_text_packet_dm_route() -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra(dm_allowlist=["!bdcf584f"])))
+
+    route = meshtastic.normalize_inbound(
+        {
+            "from": 3184482383,
+            "to": 1136017416,
+            "id": 123456789,
+            "decoded": {
+                "portnum": "TEXT_MESSAGE_APP",
+                "payload": b"hello tych0",
+                "text": "hello tych0",
+            },
+        }
+    )
+
+    assert route.text == "hello tych0"
+    assert route.sender_node_id == "!bdcf584f"
+    assert route.is_group is False
+    assert route.channel_index is None
+    assert route.message_id == "123456789"
+    assert route.reply_target == "node/!bdcf584f"
 
 
 def test_build_inbound_event_group_route() -> None:
@@ -117,12 +142,65 @@ def test_handle_inbound_routes_message_event() -> None:
     assert meshtastic._last_inbound_activity is not None
 
 
+def test_handle_inbound_routes_official_meshtastic_text_packet() -> None:
+    meshtastic = adapter.MeshtasticAdapter(
+        cfg(valid_serial_extra(dm_allowlist=["!bdcf584f"]))
+    )
+
+    routed: list[adapter.MessageEvent] = []
+
+    async def fake_handle_message(event: adapter.MessageEvent) -> None:
+        routed.append(event)
+
+    meshtastic.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    ok = asyncio.run(
+        meshtastic.handle_inbound(
+            {
+                "from": 3184482383,
+                "id": 123456789,
+                "decoded": {
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "payload": b"hello tych0",
+                },
+            }
+        )
+    )
+
+    assert ok is True
+    assert len(routed) == 1
+    assert routed[0].text == "hello tych0"
+    assert routed[0].source.chat_id == "node/!bdcf584f"
+    assert routed[0].message_id == "123456789"
+    assert meshtastic._last_inbound_activity is not None
+
+
 def test_handle_inbound_rejects_invalid_payload() -> None:
     meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
 
     ok = asyncio.run(meshtastic.handle_inbound({"text": "missing sender"}))
 
     assert ok is False
+
+
+def test_handle_inbound_ignores_official_non_text_packet_without_warning(caplog) -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    with caplog.at_level(logging.WARNING):
+        ok = asyncio.run(
+            meshtastic.handle_inbound(
+                {
+                    "from": 3184482383,
+                    "decoded": {
+                        "portnum": "NODEINFO_APP",
+                        "payload": b"not a text message",
+                    },
+                }
+            )
+        )
+
+    assert ok is False
+    assert "Meshtastic inbound normalization failed" not in caplog.text
 
 
 def test_handle_inbound_dm_policy_disabled() -> None:

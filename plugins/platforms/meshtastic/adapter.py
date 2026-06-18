@@ -52,6 +52,10 @@ class InboundRoute:
     raw_payload: Mapping[str, Any]
 
 
+class _IgnoredInboundPayload(ValueError):
+    """Raised for valid Meshtastic packets that should not enter Hermes chat routing."""
+
+
 class _PlatformValue(str):
     """String wrapper that mimics Enum-style ``.value`` access."""
 
@@ -291,6 +295,9 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
 
         try:
             route = self.normalize_inbound(payload)
+        except _IgnoredInboundPayload as exc:
+            logger.debug("Meshtastic inbound packet ignored: %s", exc)
+            return False
         except Exception as exc:
             logger.warning("Meshtastic inbound normalization failed: %s", exc)
             return False
@@ -645,17 +652,13 @@ def register(ctx) -> None:
 def _normalize_inbound_payload(payload: Mapping[str, Any]) -> InboundRoute:
     """Normalize a raw Meshtastic inbound payload for Hermes routing."""
 
-    text = _coerce_plain_text(payload.get("text"))
+    text = _extract_inbound_text(payload)
 
-    sender_raw = payload.get("sender_node_id")
-    if sender_raw is None:
-        sender_raw = payload.get("sender")
-    if sender_raw is None:
-        sender_raw = payload.get("from")
+    sender_raw = _extract_inbound_sender(payload)
     if sender_raw is None:
         raise ValueError("inbound payload missing sender_node_id")
 
-    sender_node_id = _normalize_sender_node_id(str(sender_raw))
+    sender_node_id = _normalize_sender_node_id(sender_raw)
 
     sender_name_raw = payload.get("sender_name")
     if sender_name_raw is None:
@@ -684,6 +687,12 @@ def _normalize_inbound_payload(payload: Mapping[str, Any]) -> InboundRoute:
     message_id_raw = payload.get("message_id")
     if message_id_raw is None:
         message_id_raw = payload.get("messageId")
+    if message_id_raw is None:
+        message_id_raw = payload.get("id")
+    if message_id_raw is None:
+        message_id_raw = payload.get("packet_id")
+    if message_id_raw is None:
+        message_id_raw = payload.get("packetId")
     message_id = _normalize_optional_text(message_id_raw)
 
     received_at = _parse_inbound_timestamp(payload.get("timestamp"))
@@ -702,6 +711,48 @@ def _normalize_inbound_payload(payload: Mapping[str, Any]) -> InboundRoute:
         received_at=received_at,
         raw_payload=dict(payload),
     )
+
+
+def _extract_inbound_text(payload: Mapping[str, Any]) -> str:
+    """Extract plain text from Hermes-normalized or official Meshtastic packets."""
+
+    if "text" in payload:
+        return _coerce_plain_text(payload.get("text"))
+
+    decoded = payload.get("decoded")
+    if isinstance(decoded, Mapping):
+        portnum = str(decoded.get("portnum", "") or "").upper()
+        if portnum and "TEXT_MESSAGE_APP" not in portnum:
+            raise _IgnoredInboundPayload(f"non-text Meshtastic portnum: {portnum}")
+        if "text" in decoded:
+            return _coerce_plain_text(decoded.get("text"))
+        if "payload" in decoded:
+            raw = decoded.get("payload")
+            if isinstance(raw, bytes):
+                return _coerce_plain_text(raw.decode("utf-8", errors="replace"))
+            return _coerce_plain_text(raw)
+
+    return _coerce_plain_text(None)
+
+
+def _extract_inbound_sender(payload: Mapping[str, Any]) -> str | None:
+    """Extract sender node id from normalized or official Meshtastic packet keys."""
+
+    for key in ("sender_node_id", "sender", "from"):
+        raw = payload.get(key)
+        if raw is not None:
+            return _stringify_node_id(raw)
+    return None
+
+
+def _stringify_node_id(value: Any) -> str:
+    """Return hex-like text for node ids that official packets may expose as ints."""
+
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return f"{value & 0xFFFFFFFF:08x}"
+    return str(value)
 
 
 def _contains_unsupported_payload(kwargs: dict[str, Any]) -> bool:
