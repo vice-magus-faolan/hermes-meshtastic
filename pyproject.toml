@@ -5,6 +5,14 @@ description = "Hermes-native Meshtastic platform plugin scaffold"
 requires-python = ">=3.11"
 dependencies = [
   "meshtastic>=2.7,<3",
+  "requests>=2.31,<3",
+  "pypubsub>=4,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.8,<1",
 ]
 
 [tool.pytest.ini_options]

@@ -472,6 +472,22 @@ def test_http_keepalive_5xx_triggers_reconnect() -> None:
     asyncio.run(_scenario())
 
 
+def test_adapter_successful_connect_does_not_set_fatal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = StubAdapterTransport(connect_ok=True)
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()), transport=transport)
+
+    def mark_fatal(code: str, message: str, *, retryable: bool) -> None:
+        del code, message, retryable
+        meshtastic._running = False
+
+    monkeypatch.setattr(meshtastic, "_set_fatal_error", mark_fatal)
+
+    assert asyncio.run(meshtastic.connect()) is True
+    assert meshtastic._running is True
+
+
 def test_adapter_connect_disconnect_uses_transport() -> None:
     transport = StubAdapterTransport(connect_ok=True)
     meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()), transport=transport)

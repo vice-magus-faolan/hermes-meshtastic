@@ -114,7 +114,7 @@ def normalize_outbound_target(raw: str) -> OutboundTarget:
 
     if value.startswith("channel/"):
         channel_raw = value.split("/", 1)[1].strip()
-        if not channel_raw or not channel_raw.isdigit():
+        if not channel_raw or not channel_raw.isascii() or not channel_raw.isdecimal():
             raise ConfigValidationError(
                 f"invalid channel target '{raw}': expected channel/<non-negative-int>"
             )
@@ -195,7 +195,7 @@ def parse_extra(extra: Mapping[str, Any]) -> MeshtasticConfig:
     require_mention = _parse_bool(extra.get("require_mention"), default=True)
 
     text_chunk_bytes = _parse_positive_int(
-        extra.get("text_chunk_bytes", 200),
+        extra.get("text_chunk_bytes", 180),
         field_name="text_chunk_bytes",
     )
     if text_chunk_bytes > 200:
@@ -298,7 +298,7 @@ def _parse_channel_allowlist(value: Any) -> tuple[int, ...]:
 
     channels: list[int] = []
     for item in raw_items:
-        if not item.isdigit():
+        if not item.isascii() or not item.isdecimal():
             raise ConfigValidationError(
                 f"invalid channel '{item}': expected non-negative integer"
             )

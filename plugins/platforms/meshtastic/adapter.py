@@ -209,7 +209,6 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
         ok = await self._transport.connect()
         if ok:
             self._mark_connected()
-            self._set_fatal_error("", "", retryable=True)
             return True
 
         self._mark_disconnected()
@@ -442,7 +441,9 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 error = (
                     f"meshtastic outbound send failed on chunk {idx + 1}/{len(chunks)}: {exc}"
                 )
-                self._set_fatal_error("outbound_send_failed", error, retryable=retryable)
+                # A per-message send failure does not mean the platform adapter is
+                # unusable.  Marking it fatal stops Hermes from processing all
+                # subsequent mesh traffic and also misrepresents timeout outcomes.
                 return SendResult(
                     success=False,
                     error=error,
@@ -466,7 +467,6 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
             if idx + 1 < len(chunks):
                 await asyncio.sleep(self._cfg.chunk_delay_seconds)
 
-        self._set_fatal_error("", "", retryable=True)
         return SendResult(
             success=True,
             message_id=receipts[-1]["message_id"] if receipts else None,

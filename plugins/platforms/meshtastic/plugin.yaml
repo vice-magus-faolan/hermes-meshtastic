@@ -10,8 +10,8 @@ author: hermes-meshtastic contributors
 
 requires_env:
   - name: MESHTASTIC_TRANSPORT
-    description: "Transport type: serial or http"
-    prompt: "Meshtastic transport (serial/http)"
+    description: "Transport type: serial, http, or tcp"
+    prompt: "Meshtastic transport (serial/http/tcp)"
     password: false
 
 optional_env:
@@ -22,6 +22,14 @@ optional_env:
   - name: MESHTASTIC_HTTP_BASE_URL
     description: "HTTP base URL when transport=http (e.g. http://192.168.1.25:4403)"
     prompt: "Meshtastic HTTP base URL"
+    password: false
+  - name: MESHTASTIC_TCP_HOST
+    description: "TCP host when transport=tcp (e.g. 192.168.1.25)"
+    prompt: "Meshtastic TCP host"
+    password: false
+  - name: MESHTASTIC_TCP_PORT
+    description: "TCP port when transport=tcp (default 4403)"
+    prompt: "Meshtastic TCP port"
     password: false
   - name: MESHTASTIC_NODE_NAME
     description: "Optional local node display name"
@@ -52,7 +60,7 @@ optional_env:
     prompt: "Require mention"
     password: false
   - name: MESHTASTIC_TEXT_CHUNK_BYTES
-    description: "Max bytes per outbound chunk (1..200, default 200)"
+    description: "Max bytes per outbound chunk (1..200, default 180)"
     prompt: "Chunk size bytes"
     password: false
   - name: MESHTASTIC_CHUNK_DELAY_SECONDS
