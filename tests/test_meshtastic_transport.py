@@ -631,7 +631,7 @@ def test_http_send_uses_official_toradio_protobuf_put_contract() -> None:
     async def _scenario() -> None:
         session = _FakeHttpSession()
         transport = HttpMeshtasticTransport(
-            "http://mesh.local",
+            "http://mesh.local/mesh/",
             session_factory=lambda: cast(requests.Session, session),
             keepalive_enabled=False,
         )
@@ -646,7 +646,7 @@ def test_http_send_uses_official_toradio_protobuf_put_contract() -> None:
         assert receipt.raw_response["status_code"] == 204
         assert len(session.put_calls) == 1
         call = session.put_calls[0]
-        assert call["url"] == "http://mesh.local/api/v1/toradio"
+        assert call["url"] == "http://mesh.local/mesh/api/v1/toradio"
         assert call["headers"] == {"Content-Type": "application/x-protobuf"}
         assert call["timeout"] == transport._send_timeout_seconds
 

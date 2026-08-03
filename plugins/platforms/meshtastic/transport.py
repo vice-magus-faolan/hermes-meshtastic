@@ -686,7 +686,7 @@ class HttpMeshtasticTransport(MeshtasticTransport):
 
         to_radio = mesh_pb2.ToRadio(packet=packet)
         body = to_radio.SerializeToString()
-        url = urljoin(self._base_url, "/api/v1/toradio")
+        url = urljoin(self._base_url, "api/v1/toradio")
         response = client.put(
             url,
             data=body,
