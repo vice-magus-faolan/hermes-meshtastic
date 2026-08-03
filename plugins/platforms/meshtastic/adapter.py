@@ -737,7 +737,7 @@ def _extract_inbound_text(payload: Mapping[str, Any]) -> str:
                 return _coerce_plain_text(raw.decode("utf-8", errors="replace"))
             return _coerce_plain_text(raw)
 
-    return _coerce_plain_text(None)
+    raise _IgnoredInboundPayload("packet has no text payload")
 
 
 def _extract_inbound_sender(payload: Mapping[str, Any]) -> str | None:

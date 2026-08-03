@@ -183,6 +183,16 @@ def test_handle_inbound_rejects_invalid_payload() -> None:
     assert ok is False
 
 
+def test_handle_inbound_ignores_no_text_packet_without_warning(caplog) -> None:
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
+
+    with caplog.at_level(logging.WARNING):
+        ok = asyncio.run(meshtastic.handle_inbound({"from": 3184482383, "decoded": {}}))
+
+    assert ok is False
+    assert "Meshtastic inbound normalization failed" not in caplog.text
+
+
 def test_handle_inbound_ignores_official_non_text_packet_without_warning(caplog) -> None:
     meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
 
