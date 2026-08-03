@@ -472,6 +472,35 @@ def test_http_keepalive_5xx_triggers_reconnect() -> None:
     asyncio.run(_scenario())
 
 
+def test_adapter_connect_accepts_gateway_reconnect_keyword() -> None:
+    transport = StubAdapterTransport(connect_ok=True)
+    meshtastic = adapter.MeshtasticAdapter(cfg(valid_serial_extra()), transport=transport)
+
+    assert asyncio.run(meshtastic.connect(is_reconnect=True)) is True
+
+
+def test_adapter_send_timeout_is_not_retryable() -> None:
+    class TimeoutTransport(StubSendTransport):
+        async def send_text(
+            self,
+            *,
+            text: str,
+            destination_id: str | None,
+            channel_index: int | None,
+        ):
+            del text, destination_id, channel_index
+            raise TimeoutError("send outcome is indeterminate")
+
+    meshtastic = adapter.MeshtasticAdapter(
+        cfg(valid_serial_extra()), transport=TimeoutTransport()
+    )
+
+    result = asyncio.run(meshtastic.send("channel/0", "hello"))
+
+    assert result.success is False
+    assert result.retryable is False
+
+
 def test_adapter_successful_connect_does_not_set_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

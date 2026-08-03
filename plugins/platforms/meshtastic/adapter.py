@@ -202,9 +202,12 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
     def name(self) -> str:
         return "Meshtastic"
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect configured transport and update adapter connection state."""
 
+        # The gateway passes this lifecycle hint; transport reconnect policy is
+        # intentionally owned by MeshtasticTransport.
+        del is_reconnect
         self._set_transport_inbound_handler(self.handle_inbound)
         ok = await self._transport.connect()
         if ok:
@@ -437,7 +440,9 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 )
             except Exception as exc:
                 sent_chunks = len(receipts)
-                retryable = sent_chunks == 0
+                # A thread-backed transport may finish radio delivery after the
+                # awaitable times out, so retries could duplicate the first chunk.
+                retryable = sent_chunks == 0 and not isinstance(exc, TimeoutError)
                 error = (
                     f"meshtastic outbound send failed on chunk {idx + 1}/{len(chunks)}: {exc}"
                 )
