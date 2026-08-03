@@ -229,8 +229,16 @@ def test_adapter_instantiates_against_contract_faithful_base(monkeypatch: pytest
         async def get_chat_info(self, chat_id: str) -> dict[str, object]:
             raise NotImplementedError
 
+    class MessageType(str):
+        TEXT = "text"
+
+    class MessageEvent:
+        pass
+
     setattr(gateway_config, "Platform", Platform)
     setattr(gateway_base, "BasePlatformAdapter", BasePlatformAdapter)
+    setattr(gateway_base, "MessageEvent", MessageEvent)
+    setattr(gateway_base, "MessageType", MessageType)
     setattr(gateway_base, "SendResult", SendResult)
 
     monkeypatch.setitem(sys.modules, "gateway", gateway_pkg)
@@ -246,6 +254,7 @@ def test_adapter_instantiates_against_contract_faithful_base(monkeypatch: pytest
     monkeypatch.setitem(sys.modules, module_name, contract_adapter)
     spec.loader.exec_module(contract_adapter)
 
+    assert contract_adapter.BasePlatformAdapter is BasePlatformAdapter
     instance = contract_adapter.MeshtasticAdapter(cfg(valid_serial_extra()))
     info = asyncio.run(instance.get_chat_info("channel/0"))
     assert isinstance(instance, contract_adapter.BasePlatformAdapter)

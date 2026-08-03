@@ -28,6 +28,7 @@ InboundHandler = Callable[[dict[str, Any]], Awaitable[bool] | bool]
 
 _OPEN_TIMEOUT_SECONDS = 12.0
 _PROBE_TIMEOUT_SECONDS = 5.0
+_SEND_TIMEOUT_SECONDS = 15.0
 _KEEPALIVE_INTERVAL_SECONDS = 45.0
 _MAX_RECONNECT_ATTEMPTS = 3
 _RECONNECT_BASE_DELAY_SECONDS = 1.0
@@ -61,6 +62,10 @@ class SendReceipt:
     raw_response: dict[str, Any]
 
 
+class SendOutcomeIndeterminate(TimeoutError):
+    """Raised when a send deadline expires before delivery can be confirmed."""
+
+
 class MeshtasticTransport(abc.ABC):
     """Lifecycle manager for a concrete Meshtastic transport backend."""
 
@@ -77,12 +82,15 @@ class MeshtasticTransport(abc.ABC):
 
         self._open_timeout_seconds = _OPEN_TIMEOUT_SECONDS
         self._probe_timeout_seconds = _PROBE_TIMEOUT_SECONDS
+        self._send_timeout_seconds = _SEND_TIMEOUT_SECONDS
         self._keepalive_enabled = keepalive_enabled
         self._keepalive_interval_seconds = keepalive_interval_seconds
 
         self._client: Any = None
         self._connected = False
+        self._connection_generation = 0
         self._connect_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._inbound_handler: InboundHandler | None = None
@@ -167,15 +175,13 @@ class MeshtasticTransport(abc.ABC):
 
             self._client = client
             self._connected = True
+            self._connection_generation += 1
             self._keepalive_failures = 0
             self._last_error = None
             self._last_connect_at = _utcnow()
 
             if self._keepalive_enabled and self._keepalive_task is None:
-                self._keepalive_task = asyncio.create_task(
-                    self._keepalive_loop(),
-                    name=f"meshtastic-{self.transport_name}-keepalive",
-                )
+                self._start_keepalive_task()
 
             return True
 
@@ -186,13 +192,17 @@ class MeshtasticTransport(abc.ABC):
             self._shutdown_event.set()
             keepalive = self._keepalive_task
             current_task = asyncio.current_task()
-            if keepalive is not None and keepalive is not current_task:
+            if keepalive is not current_task:
                 self._keepalive_task = None
-                keepalive.cancel()
-                try:
-                    await keepalive
-                except asyncio.CancelledError:
-                    pass
+            if keepalive is not None and keepalive is not current_task:
+                keepalive_loop = keepalive.get_loop()
+                if not keepalive_loop.is_closed():
+                    keepalive.cancel()
+                    if keepalive_loop is asyncio.get_running_loop():
+                        try:
+                            await keepalive
+                        except asyncio.CancelledError:
+                            pass
 
             if self._client is not None:
                 try:
@@ -217,20 +227,27 @@ class MeshtasticTransport(abc.ABC):
     async def reconnect(self) -> bool:
         """Reconnect transport with bounded exponential backoff."""
 
-        await self.disconnect()
-        self._reconnect_attempts = 0
-
-        delay = _RECONNECT_BASE_DELAY_SECONDS
-        for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
-            self._reconnect_attempts = attempt
-            if await self.connect():
+        requested_generation = self._connection_generation
+        async with self._reconnect_lock:
+            if (
+                self._connected
+                and self._connection_generation != requested_generation
+            ):
                 return True
+            await self.disconnect()
+            self._reconnect_attempts = 0
 
-            if attempt < _MAX_RECONNECT_ATTEMPTS:
-                await asyncio.sleep(delay)
-                delay = min(delay * 2.0, _RECONNECT_MAX_DELAY_SECONDS)
+            delay = _RECONNECT_BASE_DELAY_SECONDS
+            for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
+                self._reconnect_attempts = attempt
+                if await self.connect():
+                    return True
 
-        return False
+                if attempt < _MAX_RECONNECT_ATTEMPTS:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2.0, _RECONNECT_MAX_DELAY_SECONDS)
+
+            return False
 
     async def ensure_connected(self) -> bool:
         """Ensure transport is connected, attempting reconnect if needed."""
@@ -301,8 +318,14 @@ class MeshtasticTransport(abc.ABC):
                     destination_id,
                     channel_index,
                 ),
-                timeout=self._probe_timeout_seconds,
+                timeout=self._send_timeout_seconds,
             )
+        except asyncio.TimeoutError as exc:
+            self._last_error = (
+                "send outcome indeterminate: delivery was not confirmed before "
+                f"the {self._send_timeout_seconds:.1f}s deadline"
+            )
+            raise SendOutcomeIndeterminate(self._last_error) from exc
         except Exception as exc:
             self._last_error = f"send failed: {exc}"
             raise
@@ -333,6 +356,7 @@ class MeshtasticTransport(abc.ABC):
     async def _keepalive_loop(self) -> None:
         """Periodic liveness checks that trigger reconnect on stale sessions."""
 
+        current_task = asyncio.current_task()
         try:
             while not self._shutdown_event.is_set():
                 await asyncio.sleep(self._keepalive_interval_seconds)
@@ -352,11 +376,35 @@ class MeshtasticTransport(abc.ABC):
                         self.address,
                     )
                     await self.reconnect()
+                    return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = f"keepalive loop failed: {exc}"
             logger.exception("Meshtastic %s keepalive loop crashed", self.transport_name)
+        finally:
+            if self._keepalive_task is current_task:
+                self._keepalive_task = None
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+                if (
+                    self._connected
+                    and not self._shutdown_event.is_set()
+                    and not loop.is_closed()
+                ):
+                    self._start_keepalive_task()
+
+    def _start_keepalive_task(self) -> None:
+        """Start exactly one named keepalive task for the active connection."""
+
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        self._keepalive_task = asyncio.create_task(
+            self._keepalive_loop(),
+            name=f"meshtastic-{self.transport_name}-keepalive",
+        )
 
     @abc.abstractmethod
     def _open_client(self) -> Any:
@@ -434,29 +482,9 @@ class _PubSubMeshtasticTransport(MeshtasticTransport):
         if not callable(send_text):
             raise RuntimeError(f"{self.transport_name} transport client does not expose sendText")
 
-        kwargs: dict[str, Any] = {}
-        if destination_id is not None:
-            kwargs["destinationId"] = destination_id
-        if channel_index is not None:
-            kwargs["channelIndex"] = channel_index
-
-        call_attempts: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
-            ((text,), kwargs),
-            ((), {"text": text, **kwargs}),
-            ((text,), {}),
-        ]
-
-        last_exc: Exception | None = None
-        for args, kw in call_attempts:
-            try:
-                return send_text(*args, **kw)
-            except TypeError as exc:
-                last_exc = exc
-                continue
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError(f"{self.transport_name} sendText invocation failed")
+        destination = destination_id if destination_id is not None else "^all"
+        channel = channel_index if channel_index is not None else 0
+        return send_text(text, destinationId=destination, channelIndex=channel)
 
     def _subscribe_inbound(self, client: Any) -> None:
         if self._pubsub_callback is not None or self._inbound_handler is None:
@@ -641,48 +669,42 @@ class HttpMeshtasticTransport(MeshtasticTransport):
         destination_id: str | None,
         channel_index: int | None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"text": text}
-        if destination_id is not None:
-            payload["destinationId"] = destination_id
-        if channel_index is not None:
-            payload["channelIndex"] = channel_index
+        """Send a text packet using the Meshtastic HTTP protobuf contract."""
 
-        candidate_paths = (
-            "/api/v1/sendtext",
-            "/api/v1/text",
-            "/sendtext",
+        mesh_pb2 = importlib.import_module("meshtastic.protobuf.mesh_pb2")
+        portnums_pb2 = importlib.import_module("meshtastic.protobuf.portnums_pb2")
+
+        data = mesh_pb2.Data(
+            portnum=portnums_pb2.TEXT_MESSAGE_APP,
+            payload=text.encode("utf-8"),
         )
+        packet = mesh_pb2.MeshPacket(
+            to=_destination_id_to_uint32(destination_id),
+            channel=channel_index if channel_index is not None else 0,
+        )
+        packet.decoded.CopyFrom(data)
 
-        last_error: Exception | None = None
-        for path in candidate_paths:
-            url = urljoin(self._base_url, path.lstrip("/"))
-            try:
-                response = client.post(url, json=payload, timeout=self._probe_timeout_seconds)
-            except Exception as exc:
-                last_error = RuntimeError(f"http send request failed at {url}: {exc}")
-                continue
+        to_radio = mesh_pb2.ToRadio(packet=packet)
+        body = to_radio.SerializeToString()
+        url = urljoin(self._base_url, "/api/v1/toradio")
+        response = client.put(
+            url,
+            data=body,
+            headers={"Content-Type": "application/x-protobuf"},
+            timeout=self._send_timeout_seconds,
+        )
+        if response.status_code >= 400:
+            response_body = (response.text or "").strip()
+            raise RuntimeError(
+                f"http send failed at {url}: HTTP {response.status_code}"
+                + (f" body={response_body[:240]!r}" if response_body else "")
+            )
 
-            if response.status_code == 404:
-                last_error = RuntimeError(f"http send endpoint not found at {url}")
-                continue
-
-            if response.status_code >= 400:
-                body = (response.text or "").strip()
-                raise RuntimeError(
-                    f"http send failed at {url}: HTTP {response.status_code}"
-                    + (f" body={body[:240]!r}" if body else "")
-                )
-
-            parsed = _response_payload(response)
-            if not isinstance(parsed, dict):
-                parsed = {"detail": parsed}
-            parsed.setdefault("status_code", response.status_code)
-            parsed.setdefault("url", url)
-            return parsed
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("http send failed: no endpoint attempts were executed")
+        return {
+            "status_code": response.status_code,
+            "url": url,
+            "bytes": len(body),
+        }
 
 
 def make_transport(
@@ -743,6 +765,27 @@ def _ts(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _destination_id_to_uint32(destination_id: str | None) -> int:
+    """Encode a canonical Meshtastic destination ID for a MeshPacket."""
+
+    if destination_id is None or destination_id == "^all":
+        return 0xFFFFFFFF
+
+    value = str(destination_id).strip().lower()
+    if value.startswith("!"):
+        value = value[1:]
+    elif value.startswith("0x"):
+        value = value[2:]
+
+    try:
+        destination = int(value, 16)
+    except ValueError as exc:
+        raise ValueError(f"invalid Meshtastic destination ID: {destination_id!r}") from exc
+    if not 0 <= destination <= 0xFFFFFFFF:
+        raise ValueError(f"Meshtastic destination ID is outside uint32: {destination_id!r}")
+    return destination
 
 
 def _response_payload(response: requests.Response) -> Any:

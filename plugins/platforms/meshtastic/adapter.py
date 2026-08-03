@@ -25,7 +25,7 @@ from .config_schema import (
     parse_config,
     validate_config as validate_meshtastic_config,
 )
-from .transport import MeshtasticTransport, make_transport
+from .transport import MeshtasticTransport, SendOutcomeIndeterminate, make_transport
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +442,7 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 sent_chunks = len(receipts)
                 # A thread-backed transport may finish radio delivery after the
                 # awaitable times out, so retries could duplicate the first chunk.
+                indeterminate = isinstance(exc, SendOutcomeIndeterminate)
                 retryable = sent_chunks == 0 and not isinstance(exc, TimeoutError)
                 error = (
                     f"meshtastic outbound send failed on chunk {idx + 1}/{len(chunks)}: {exc}"
@@ -457,6 +458,7 @@ class MeshtasticAdapter(BasePlatformAdapter):  # type: ignore[misc]
                         "sent_chunks": sent_chunks,
                         "total_chunks": len(chunks),
                         "chunk_bytes_limit": self._cfg.text_chunk_bytes,
+                        "outcome": "indeterminate" if indeterminate else "failed",
                     },
                 )
 

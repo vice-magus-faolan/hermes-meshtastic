@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import requests
 import pytest
 
+from meshtastic.protobuf import mesh_pb2, portnums_pb2
+
 from plugins.platforms.meshtastic import adapter
 from plugins.platforms.meshtastic.transport import (
     HttpMeshtasticTransport,
     MeshtasticTransport,
+    SendOutcomeIndeterminate,
     SerialMeshtasticTransport,
     TcpMeshtasticTransport,
     make_transport,
@@ -71,6 +75,11 @@ class DummyTransport(MeshtasticTransport):
 class _FakeResponse:
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
+        self.content = b""
+        self.text = ""
+
+    def json(self) -> object:
+        raise ValueError("response has no JSON body")
 
 
 class _FakeSession:
@@ -83,6 +92,32 @@ class _FakeSession:
         if not self._status_codes:
             raise AssertionError("fake session exhausted status codes")
         return _FakeResponse(self._status_codes.pop(0))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeHttpSession:
+    def __init__(self) -> None:
+        self.closed = False
+        self.put_calls: list[dict[str, object]] = []
+
+    def get(self, url: str, timeout: float) -> _FakeResponse:
+        del url, timeout
+        return _FakeResponse(200)
+
+    def put(
+        self,
+        url: str,
+        *,
+        data: bytes,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> _FakeResponse:
+        self.put_calls.append(
+            {"url": url, "data": data, "headers": headers, "timeout": timeout}
+        )
+        return _FakeResponse(204)
 
     def close(self) -> None:
         self.closed = True
@@ -137,34 +172,96 @@ class _FakeTcpClient(_FakeSerialClient):
 
 
 def test_transport_connect_disconnect_success() -> None:
-    transport = DummyTransport()
-    assert asyncio.run(transport.connect()) is True
-    assert transport.connected is True
+    async def _scenario() -> None:
+        transport = DummyTransport()
+        assert await transport.connect() is True
+        assert transport.connected is True
 
-    status_after_connect = transport.status()
-    assert status_after_connect.connected is True
-    assert status_after_connect.last_connect_at is not None
+        status_after_connect = transport.status()
+        assert status_after_connect.connected is True
+        assert status_after_connect.last_connect_at is not None
 
-    asyncio.run(transport.disconnect())
-    status_after_disconnect = transport.status()
-    assert status_after_disconnect.connected is False
-    assert status_after_disconnect.last_disconnect_at is not None
+        await transport.disconnect()
+        status_after_disconnect = transport.status()
+        assert status_after_disconnect.connected is False
+        assert status_after_disconnect.last_disconnect_at is not None
+
+    asyncio.run(_scenario())
 
 
 def test_transport_reconnect_retries_until_success() -> None:
-    transport = DummyTransport(open_failures=1)
+    async def _scenario() -> None:
+        transport = DummyTransport(open_failures=1)
 
-    assert asyncio.run(transport.connect()) is False
-    status = transport.status()
-    assert status.connected is False
-    assert status.last_error is not None
+        assert await transport.connect() is False
+        status = transport.status()
+        assert status.connected is False
+        assert status.last_error is not None
 
-    assert asyncio.run(transport.reconnect()) is True
-    status = transport.status()
-    assert status.connected is True
-    assert transport.open_count >= 2
+        assert await transport.reconnect() is True
+        status = transport.status()
+        assert status.connected is True
+        assert transport.open_count >= 2
 
-    asyncio.run(transport.disconnect())
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_concurrent_reconnects_share_one_lifecycle() -> None:
+    async def _scenario() -> None:
+        transport = DummyTransport()
+        assert await transport.connect() is True
+        assert await asyncio.gather(transport.reconnect(), transport.reconnect()) == [True, True]
+        assert transport.connected is True
+        assert transport.open_count == 2
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_explicit_reconnect_replaces_an_existing_connection() -> None:
+    async def _scenario() -> None:
+        transport = DummyTransport()
+        assert await transport.connect() is True
+
+        assert await transport.reconnect() is True
+        assert transport.open_count == 2
+        assert transport.close_count == 1
+
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_keepalive_task_is_recreated_after_an_unexpected_crash() -> None:
+    async def _scenario() -> None:
+        transport = DummyTransport()
+        transport._keepalive_interval_seconds = 0.01
+        crashed = True
+
+        async def probe_once() -> dict[str, object]:
+            nonlocal crashed
+            if crashed:
+                crashed = False
+                raise RuntimeError("keepalive crash")
+            return {"ok": True}
+
+        transport.probe = probe_once  # type: ignore[method-assign]
+        assert await transport.connect() is True
+        original_task = transport._keepalive_task
+        assert original_task is not None
+
+        await asyncio.sleep(0.06)
+
+        replacement_task = transport._keepalive_task
+        assert replacement_task is not None
+        assert replacement_task is not original_task
+        assert not replacement_task.done()
+
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
 
 
 def test_keepalive_failures_trigger_reconnect_without_leaking_loop() -> None:
@@ -341,6 +438,78 @@ def test_tcp_transport_subscribes_inbound_pubsub_packets_and_reports_probe_detai
     asyncio.run(_scenario())
 
 
+def test_tcp_send_text_always_preserves_destination_and_channel() -> None:
+    class StrictTcpClient(_FakeTcpClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.send_calls: list[dict[str, object]] = []
+
+        def sendText(
+            self,
+            text: str,
+            *,
+            destinationId: str,
+            channelIndex: int,
+        ) -> dict[str, object]:
+            call = {
+                "text": text,
+                "destinationId": destinationId,
+                "channelIndex": channelIndex,
+            }
+            self.send_calls.append(call)
+            return call
+
+    async def _scenario() -> None:
+        client = StrictTcpClient()
+        transport = TcpMeshtasticTransport(
+            "192.168.132.135",
+            client_factory=lambda host, port: client,
+            keepalive_enabled=False,
+        )
+        assert await transport.connect() is True
+
+        await transport.send_text(text="broadcast", destination_id=None, channel_index=None)
+        await transport.send_text(
+            text="private",
+            destination_id="!89abcdef",
+            channel_index=3,
+        )
+
+        assert client.send_calls == [
+            {"text": "broadcast", "destinationId": "^all", "channelIndex": 0},
+            {"text": "private", "destinationId": "!89abcdef", "channelIndex": 3},
+        ]
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_send_timeout_reports_an_indeterminate_outcome_without_retry() -> None:
+    class SlowSendTransport(DummyTransport):
+        def _send_text_client(
+            self,
+            client: object,
+            text: str,
+            destination_id: str | None,
+            channel_index: int | None,
+        ) -> dict[str, object]:
+            del client, text, destination_id, channel_index
+            time.sleep(0.05)
+            return {"id": "late"}
+
+    async def _scenario() -> None:
+        transport = SlowSendTransport()
+        transport._send_timeout_seconds = 0.001
+        assert await transport.connect() is True
+
+        with pytest.raises(SendOutcomeIndeterminate, match="indeterminate"):
+            await transport.send_text(text="hello")
+
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
 def test_adapter_tcp_runtime_uses_official_library_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _scenario() -> None:
         fake_pubsub = _FakePubSub()
@@ -364,8 +533,18 @@ def test_adapter_tcp_runtime_uses_official_library_shape(monkeypatch: pytest.Mon
             def close(self) -> None:
                 self.closed = True
 
-            def sendText(self, text: str, **kwargs: object) -> dict[str, object]:
-                call = {"text": text, **kwargs}
+            def sendText(
+                self,
+                text: str,
+                *,
+                destinationId: str,
+                channelIndex: int,
+            ) -> dict[str, object]:
+                call = {
+                    "text": text,
+                    "destinationId": destinationId,
+                    "channelIndex": channelIndex,
+                }
                 self.send_calls.append(call)
                 return {"id": f"pkt-{len(self.send_calls)}", **call}
 
@@ -397,7 +576,11 @@ def test_adapter_tcp_runtime_uses_official_library_shape(monkeypatch: pytest.Mon
         assert result.raw_response is not None
         assert result.raw_response["chunk_count"] == 1
         assert client.send_calls == [
-            {"text": "hello over tcp", "destinationId": "!89abcdef"}
+            {
+                "text": "hello over tcp",
+                "destinationId": "!89abcdef",
+                "channelIndex": 0,
+            }
         ]
 
         await meshtastic.disconnect()
@@ -438,6 +621,42 @@ def test_http_probe_5xx_is_unhealthy() -> None:
         assert status.last_probe_at is not None
         assert status.last_probe_result is not None
         assert status.last_probe_result.get("ok") is False
+
+        await transport.disconnect()
+
+    asyncio.run(_scenario())
+
+
+def test_http_send_uses_official_toradio_protobuf_put_contract() -> None:
+    async def _scenario() -> None:
+        session = _FakeHttpSession()
+        transport = HttpMeshtasticTransport(
+            "http://mesh.local",
+            session_factory=lambda: cast(requests.Session, session),
+            keepalive_enabled=False,
+        )
+
+        assert await transport.connect() is True
+        receipt = await transport.send_text(
+            text="hello over http",
+            destination_id="!89abcdef",
+            channel_index=2,
+        )
+
+        assert receipt.raw_response["status_code"] == 204
+        assert len(session.put_calls) == 1
+        call = session.put_calls[0]
+        assert call["url"] == "http://mesh.local/api/v1/toradio"
+        assert call["headers"] == {"Content-Type": "application/x-protobuf"}
+        assert call["timeout"] == transport._send_timeout_seconds
+
+        to_radio = mesh_pb2.ToRadio()
+        to_radio.ParseFromString(cast(bytes, call["data"]))
+        assert to_radio.HasField("packet")
+        assert to_radio.packet.to == int("89abcdef", 16)
+        assert to_radio.packet.channel == 2
+        assert to_radio.packet.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP
+        assert to_radio.packet.decoded.payload == b"hello over http"
 
         await transport.disconnect()
 
@@ -489,7 +708,7 @@ def test_adapter_send_timeout_is_not_retryable() -> None:
             channel_index: int | None,
         ):
             del text, destination_id, channel_index
-            raise TimeoutError("send outcome is indeterminate")
+            raise SendOutcomeIndeterminate("send outcome is indeterminate")
 
     meshtastic = adapter.MeshtasticAdapter(
         cfg(valid_serial_extra()), transport=TimeoutTransport()
@@ -499,7 +718,8 @@ def test_adapter_send_timeout_is_not_retryable() -> None:
 
     assert result.success is False
     assert result.retryable is False
-
+    assert result.raw_response is not None
+    assert result.raw_response["outcome"] == "indeterminate"
 
 def test_adapter_successful_connect_does_not_set_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
