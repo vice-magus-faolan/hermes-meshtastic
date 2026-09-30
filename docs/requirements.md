@@ -43,13 +43,14 @@ The transport ideas are reusable. The OpenClaw runtime coupling is not.
 #### V0
 - Serial transport
 - HTTP transport
+- TCP transport via the Meshtastic Python library
 
 #### Later phase
 - MQTT transport
 
 Rationale:
 - MeshClaw supports serial, HTTP, and MQTT.
-- Serial and HTTP are simpler to reason about for a native plugin.
+- Serial, HTTP, and library-backed TCP are simpler to reason about for a native plugin than MQTT.
 - MQTT adds broker semantics, credential exposure risk, and different delivery/debugging behavior.
 
 ### 3) Conversation types

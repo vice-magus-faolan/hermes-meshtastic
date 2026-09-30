@@ -1,0 +1,73 @@
+name: meshtastic-platform
+label: Meshtastic
+kind: platform
+version: 0.1.0
+description: >
+  Hermes-native Meshtastic platform adapter scaffold.
+  Defines plugin metadata, config contract, target normalization,
+  and strict fail-closed runtime semantics for the pre-transport phase.
+author: hermes-meshtastic contributors
+
+requires_env:
+  - name: MESHTASTIC_TRANSPORT
+    description: "Transport type: serial, http, or tcp"
+    prompt: "Meshtastic transport (serial/http/tcp)"
+    password: false
+
+optional_env:
+  - name: MESHTASTIC_SERIAL_PATH
+    description: "Serial device path when transport=serial (e.g. /dev/ttyUSB0)"
+    prompt: "Meshtastic serial path"
+    password: false
+  - name: MESHTASTIC_HTTP_BASE_URL
+    description: "HTTP base URL when transport=http (e.g. http://192.168.1.25:4403)"
+    prompt: "Meshtastic HTTP base URL"
+    password: false
+  - name: MESHTASTIC_TCP_HOST
+    description: "TCP host when transport=tcp (e.g. 192.168.1.25)"
+    prompt: "Meshtastic TCP host"
+    password: false
+  - name: MESHTASTIC_TCP_PORT
+    description: "TCP port when transport=tcp (default 4403)"
+    prompt: "Meshtastic TCP port"
+    password: false
+  - name: MESHTASTIC_NODE_NAME
+    description: "Optional local node display name"
+    prompt: "Meshtastic node name"
+    password: false
+  - name: MESHTASTIC_DM_POLICY
+    description: "DM policy: disabled | open | allowlist (default allowlist)"
+    prompt: "DM policy"
+    password: false
+  - name: MESHTASTIC_GROUP_POLICY
+    description: "Group policy: disabled | open | allowlist (default allowlist)"
+    prompt: "Group policy"
+    password: false
+  - name: MESHTASTIC_DM_ALLOWLIST
+    description: "Comma-separated allowed DM node IDs (canonicalized to !<8hex>)"
+    prompt: "Allowed DM node IDs"
+    password: false
+  - name: MESHTASTIC_ALLOWED_CHANNELS
+    description: "Comma-separated allowed channel indexes for group traffic"
+    prompt: "Allowed channel indexes"
+    password: false
+  - name: MESHTASTIC_GROUP_SENDER_ALLOWLIST
+    description: "Optional sender allowlist for group messages"
+    prompt: "Allowed group sender node IDs"
+    password: false
+  - name: MESHTASTIC_REQUIRE_MENTION
+    description: "Require mention in group channels before responding (true/false)"
+    prompt: "Require mention"
+    password: false
+  - name: MESHTASTIC_TEXT_CHUNK_BYTES
+    description: "Max bytes per outbound chunk (1..200, default 180)"
+    prompt: "Chunk size bytes"
+    password: false
+  - name: MESHTASTIC_CHUNK_DELAY_SECONDS
+    description: "Delay between chunks in seconds (default 1.5)"
+    prompt: "Chunk delay seconds"
+    password: false
+  - name: MESHTASTIC_HOME_CHANNEL
+    description: "Default cron delivery target (node/!<8hex> or channel/<index>)"
+    prompt: "Home channel target"
+    password: false
